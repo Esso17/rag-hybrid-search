@@ -354,7 +354,7 @@ def calculate_retrieval_precision(
 
     # Count how many results contain expected terms
     relevant_count = 0
-    term_coverage = {term: 0 for term in expected_terms}
+    term_coverage = dict.fromkeys(expected_terms, 0)
 
     for result in top_results:
         content_lower = result.get("content", "").lower()
