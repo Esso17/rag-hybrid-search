@@ -51,17 +51,13 @@ data/
 *.db
 *.sqlite
 *.sqlite3
+.ruff_cache/
 
 # Cache
 .pytest_cache/
 .coverage
 htmlcov/
-
-# Qdrant
-qdrant_storage/
+docs/
 
 # Benchmark results (optional, can be regenerated)
 benchmark_results/
-
-# Archive (old documentation)
-docs/archive/

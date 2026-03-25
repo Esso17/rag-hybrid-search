@@ -3,9 +3,9 @@ name: CI - Code Quality & Security
 
 'on':
   push:
-    branches: [main, develop]
+    branches: [master, main, develop]
   pull_request:
-    branches: [main, develop]
+    branches: [master, main, develop]
 
 jobs:
   code-quality:
