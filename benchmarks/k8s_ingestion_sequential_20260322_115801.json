@@ -1,0 +1,42 @@
+{
+  "benchmark_name": "k8s_ingestion_sequential",
+  "timestamp": "2026-03-22T11:58:01.213406",
+  "start_time": "2026-03-22T11:27:12.075478",
+  "end_time": "2026-03-22T11:58:01.213196",
+  "configuration": {
+    "parallel_mode": "sequential",
+    "num_workers": 1,
+    "batch_size": 5,
+    "max_concurrent_embeddings": 1,
+    "version": "latest",
+    "component": "kubernetes"
+  },
+  "metrics": {
+    "total_documents": 1570,
+    "total_chunks": 26692,
+    "total_time_seconds": 1849.137717962265,
+    "documents_per_second": 0.8490443868778619,
+    "chunks_per_second": 14.434836162129866,
+    "avg_time_per_document": 1.1766370934285935,
+    "avg_chunks_per_document": 17.00127388535032,
+    "loading_time": 0.7789342403411865,
+    "embedding_time": 1847.3167190551758,
+    "vector_store_time": 0,
+    "bm25_time": 0,
+    "chunking_time": 0,
+    "peak_memory_mb": null,
+    "avg_cpu_percent": null,
+    "num_workers": 1,
+    "batch_size": 5,
+    "parallel_mode": "sequential",
+    "errors": 0,
+    "error_rate": 0.0
+  },
+  "document_times": {
+    "min": 0.01442265510559082,
+    "max": 13.993900060653687,
+    "median": 1.1944966316223145,
+    "p95": 1.9613142013549805,
+    "p99": 3.1611921787261963
+  }
+}

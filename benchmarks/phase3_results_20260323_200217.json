@@ -1,0 +1,58 @@
+{
+  "timestamp": "20260323_200217",
+  "vector_search": {
+    "1000_768": {
+      "corpus_size": 1000,
+      "dimension": 768,
+      "faiss_build_ms": 22.382736206054688,
+      "mem_build_ms": 8.873939514160156,
+      "faiss_search_ms": 0.04179239273071289,
+      "mem_search_ms": 1.9480061531066895,
+      "speedup": 46.61150094129728
+    },
+    "5000_768": {
+      "corpus_size": 5000,
+      "dimension": 768,
+      "faiss_build_ms": 278.6848545074463,
+      "mem_build_ms": 46.17118835449219,
+      "faiss_search_ms": 0.08966922760009766,
+      "mem_search_ms": 10.04694938659668,
+      "speedup": 112.04456261632545
+    },
+    "10000_768": {
+      "corpus_size": 10000,
+      "dimension": 768,
+      "faiss_build_ms": 1023.1332778930664,
+      "mem_build_ms": 88.03200721740723,
+      "faiss_search_ms": 0.14039993286132812,
+      "mem_search_ms": 21.60815715789795,
+      "speedup": 153.9043268577639
+    }
+  },
+  "bm25_search": {
+    "1000": {
+      "corpus_size": 1000,
+      "standard_build_ms": 52.90794372558594,
+      "inverted_build_ms": 58.844804763793945,
+      "standard_search_ms": 0.7813358306884766,
+      "inverted_search_ms": 12.539308071136475,
+      "speedup": 0.062310920686843116
+    },
+    "5000": {
+      "corpus_size": 5000,
+      "standard_build_ms": 259.7486972808838,
+      "inverted_build_ms": 276.60608291625977,
+      "standard_search_ms": 3.9170408248901363,
+      "inverted_search_ms": 348.59713077545166,
+      "speedup": 0.011236583663717221
+    },
+    "10000": {
+      "corpus_size": 10000,
+      "standard_build_ms": 532.4838161468506,
+      "inverted_build_ms": 550.1928329467773,
+      "standard_search_ms": 7.970952987670898,
+      "inverted_search_ms": 1471.6893935203552,
+      "speedup": 0.005416192453900872
+    }
+  }
+}

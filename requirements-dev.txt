@@ -1,0 +1,34 @@
+# Development dependencies for code quality, testing, and security
+-r requirements.txt
+
+# Pre-commit framework
+pre-commit>=3.6.0
+
+# Code formatting
+black>=24.2.0
+isort>=5.13.0
+
+# Linting
+ruff>=0.3.0
+
+# Security scanning
+bandit[toml]>=1.7.7
+safety>=3.0.0
+
+# Type checking (optional)
+mypy>=1.8.0
+types-PyYAML>=6.0.12
+types-requests>=2.31.0
+
+# YAML linting
+yamllint>=1.35.0
+
+# Testing
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+pytest-cov>=4.1.0
+pytest-mock>=3.12.0
+
+# Documentation (optional)
+sphinx>=7.2.0
+sphinx-rtd-theme>=2.0.0

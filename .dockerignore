@@ -1,0 +1,87 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+*.egg
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Documentation
+*.md
+docs/
+
+# Tests
+tests/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+
+# Docker
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Kubernetes
+k8s/
+*.yaml
+*.yml
+
+# Environment
+.env
+.env.*
+
+# Logs
+*.log
+logs/
+
+# Data
+data/
+*.db
+*.sqlite
+
+# Examples
+examples/
+
+# Scripts (development only)
+scripts/benchmark_all.py
+scripts/BENCHMARK_GUIDE.md
+scripts/README.md
+
+# Build tools
+Makefile
+setup.sh
+*.sh
+
+# Extra requirements files
+requirements-dev.txt
+requirements-phase3.txt
+
+# Misc
+TODO
+LICENSE

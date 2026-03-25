@@ -1,0 +1,41 @@
+{
+  "benchmark_name": "cilium_ingestion_sequential",
+  "timestamp": "2026-03-22T13:42:45.536340",
+  "start_time": "2026-03-22T13:41:16.711953",
+  "end_time": "2026-03-22T13:42:45.536140",
+  "configuration": {
+    "parallel_mode": "sequential",
+    "num_workers": 1,
+    "batch_size": 10,
+    "max_concurrent_embeddings": 1,
+    "version": "latest"
+  },
+  "metrics": {
+    "total_documents": 492,
+    "total_chunks": 3497,
+    "total_time_seconds": 88.82418704032898,
+    "documents_per_second": 5.539031837990439,
+    "chunks_per_second": 39.36990718994424,
+    "avg_time_per_document": 0.18002832129718813,
+    "avg_chunks_per_document": 7.107723577235772,
+    "loading_time": 0.09899282455444336,
+    "embedding_time": 88.57317161560059,
+    "vector_store_time": 0,
+    "bm25_time": 0,
+    "chunking_time": 0,
+    "peak_memory_mb": null,
+    "avg_cpu_percent": null,
+    "num_workers": 1,
+    "batch_size": 10,
+    "parallel_mode": "sequential",
+    "errors": 0,
+    "error_rate": 0.0
+  },
+  "document_times": {
+    "min": 0.05369091033935547,
+    "max": 11.907327890396118,
+    "median": 0.12016510963439941,
+    "p95": 0.5229201316833496,
+    "p99": 1.0728881359100342
+  }
+}

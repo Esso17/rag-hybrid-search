@@ -1,0 +1,16 @@
+{
+  "timestamp": "2026-03-23 20:28:19",
+  "scenarios": {
+    "3_incremental_bm25": {
+      "scenario": "incremental_bm25",
+      "base_size": 500,
+      "new_size": 50,
+      "total_size": 550,
+      "full_rebuild_ms": 13.161897659301758,
+      "incremental_ms": 1.5311241149902344,
+      "speedup": 8.596231703519154,
+      "time_saved_ms": 11.630773544311523,
+      "improvement_pct": 759.6231703519154
+    }
+  }
+}

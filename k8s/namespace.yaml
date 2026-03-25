@@ -1,0 +1,8 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rag-hybrid-search
+  labels:
+    name: rag-hybrid-search
+    environment: production

@@ -1,0 +1,49 @@
+---
+services:
+  # RAG Hybrid Search API
+  rag-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rag-api
+    ports:
+      - "8000:8000"
+    environment:
+      # API Configuration
+      API_TITLE: "RAG Hybrid Search API"
+      API_VERSION: "1.0.0"
+      DEBUG: "true"
+
+      # LLM Configuration (assumes Ollama running on host)
+      LLM_BASE_URL: "http://host.docker.internal:11434"
+      LLM_MODEL: "phi3.5:3.8b"
+      LLM_TEMPERATURE: "0.6"
+
+      # Embeddings Configuration
+      EMBEDDING_MODEL: "nomic-embed-text"
+      EMBEDDING_DIMENSION: "768"
+
+      # Search Configuration
+      HYBRID_SEARCH_ALPHA: "0.6"
+      TOP_K_RESULTS: "7"
+
+      # Document Processing
+      CHUNK_SIZE: "800"
+      CHUNK_OVERLAP: "200"
+      USE_CODE_AWARE_SPLITTING: "true"
+      USE_ENHANCED_BM25: "true"
+
+      # K8s/Cilium specific
+      USE_DEVOPS_PROMPTS: "true"
+
+      # Phase 3 Optimizations (enabled for production)
+      USE_FAISS: "true"
+      USE_INVERTED_BM25: "true"
+      FAISS_USE_HNSW: "true"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped

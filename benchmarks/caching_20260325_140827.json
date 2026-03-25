@@ -1,0 +1,57 @@
+{
+  "timestamp": "2026-03-25 14:08:27",
+  "benchmark": "semantic_caching",
+  "results": {
+    "cache_miss": {
+      "count": 5,
+      "avg_latency_ms": 6846.3483810424805,
+      "min_latency_ms": 5137.722015380859,
+      "max_latency_ms": 9570.40786743164,
+      "median_latency_ms": 5385.810136795044,
+      "std_latency_ms": 2139.145895675683,
+      "avg_search_time_ms": 0.14715194702148438
+    },
+    "cache_hit_exact": {
+      "count": 5,
+      "avg_latency_ms": 0.27403831481933594,
+      "min_latency_ms": 0.1900196075439453,
+      "max_latency_ms": 0.34689903259277344,
+      "median_latency_ms": 0.2818107604980469,
+      "avg_similarity": 1.000000035762787,
+      "hit_rate": 100.0
+    },
+    "cache_hit_semantic": {
+      "count": 5,
+      "hits": 1,
+      "hit_rate": 20.0,
+      "avg_latency_ms": 7124.348306655884,
+      "min_latency_ms": 34.98196601867676,
+      "max_latency_ms": 13163.608074188232,
+      "avg_similarity": 0.9705142974853516,
+      "min_similarity": 0.9705142974853516
+    },
+    "cache_miss_different": {
+      "count": 5,
+      "avg_latency_ms": 6602.023792266846
+    },
+    "mixed_workload": {
+      "total_queries": 10,
+      "cache_hits": 10,
+      "cache_misses": 0,
+      "hit_rate": 100.0,
+      "avg_latency_ms": 0.41899681091308594,
+      "median_latency_ms": 0.43642520904541016,
+      "effective_latency_ms": 0.27403831481933594,
+      "throughput_increase_pct": 2498217.9397946754
+    },
+    "cache_stats": {
+      "total_entries": 14,
+      "expired_entries": 0,
+      "max_size": 1000,
+      "similarity_threshold": 0.95,
+      "ttl_seconds": 3600,
+      "semantic_enabled": true,
+      "next_id": 14
+    }
+  }
+}

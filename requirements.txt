@@ -1,0 +1,19 @@
+# Core API dependencies
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+httpx>=0.25.0
+python-multipart>=0.0.6
+python-dotenv>=1.0.0
+
+# LangChain for text processing
+langchain>=0.1.0
+langchain-text-splitters>=0.0.1
+
+# Data processing
+numpy>=1.26.0
+pyyaml>=6.0.1
+
+# Vector store (FAISS for fast similarity search)
+faiss-cpu>=1.7.4

@@ -1,0 +1,93 @@
+{
+  "timestamp": "2026-03-23 22:30:16",
+  "scenarios": {
+    "1_async_embeddings": {
+      "scenario": "async_embeddings",
+      "documents": 30,
+      "chunks": 223,
+      "total_time_s": 2.975990056991577,
+      "docs_per_sec": 10.08067884149013,
+      "chunks_per_sec": 74.93304605507664,
+      "avg_time_per_doc_ms": 99.19906457265218,
+      "min_time_ms": 36.950111389160156,
+      "max_time_ms": 596.1921215057373,
+      "median_time_ms": 50.722718238830566
+    },
+    "2_parallel_ingestion": {
+      "scenario": "parallel_ingestion",
+      "num_documents": 50,
+      "sequential": {
+        "time_s": 3.711949110031128,
+        "chunks": 349,
+        "errors": 0,
+        "docs_per_sec": 13.47001225444621,
+        "chunks_per_sec": 94.02068553603455
+      },
+      "parallel_2_workers": {
+        "time_s": 2.742765188217163,
+        "chunks": 349,
+        "success": 50,
+        "errors": 0,
+        "docs_per_sec": 18.229777822322706,
+        "speedup": 1.3533601512727191
+      },
+      "parallel_4_workers": {
+        "time_s": 2.751375913619995,
+        "chunks": 349,
+        "success": 50,
+        "errors": 0,
+        "docs_per_sec": 18.17272578148539,
+        "speedup": 1.3491246658284883
+      }
+    },
+    "3_query_cache": {
+      "error": "cannot import name 'get_cached_query_embedding' from 'app.core.rag' (/Users/akeesso/projects/rag-hybrid-search/app/core/rag.py)"
+    },
+    "4_incremental_bm25": {
+      "scenario": "incremental_bm25",
+      "base_size": 1000,
+      "new_size": 100,
+      "total_size": 1100,
+      "full_rebuild_ms": 19.754886627197266,
+      "incremental_ms": 2.218008041381836,
+      "speedup": 8.90658927227776,
+      "time_saved_ms": 17.53687858581543,
+      "improvement_pct": 790.658927227776
+    },
+    "5_faiss": {
+      "scenario": "faiss",
+      "error": "FAISS not available"
+    },
+    "6_inverted_bm25": {
+      "scenario": "inverted_bm25",
+      "num_queries": 50,
+      "query_type": "specific_technical",
+      "results_by_size": {
+        "1000": {
+          "standard_build_ms": 18.91613006591797,
+          "inverted_build_ms": 19.3631649017334,
+          "standard_search_ms": 0.5121564865112305,
+          "inverted_search_ms": 0.35743236541748047,
+          "speedup": 1.4328766392294454,
+          "avg_candidates_pct": 1.0
+        },
+        "5000": {
+          "standard_build_ms": 92.88883209228516,
+          "inverted_build_ms": 98.20103645324707,
+          "standard_search_ms": 2.473921775817871,
+          "inverted_search_ms": 1.7583084106445312,
+          "speedup": 1.4069896730523073,
+          "avg_candidates_pct": 0.2
+        },
+        "10000": {
+          "standard_build_ms": 188.5840892791748,
+          "inverted_build_ms": 197.34597206115723,
+          "standard_search_ms": 4.928107261657715,
+          "inverted_search_ms": 3.634176254272461,
+          "speedup": 1.3560451989261844,
+          "avg_candidates_pct": 0.1
+        }
+      }
+    }
+  }
+}

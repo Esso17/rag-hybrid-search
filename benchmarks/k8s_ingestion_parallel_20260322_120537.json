@@ -1,0 +1,42 @@
+{
+  "benchmark_name": "k8s_ingestion_parallel",
+  "timestamp": "2026-03-22T12:05:37.919851",
+  "start_time": "2026-03-22T12:03:48.627480",
+  "end_time": "2026-03-22T12:05:37.919659",
+  "configuration": {
+    "parallel_mode": "parallel",
+    "num_workers": 8,
+    "batch_size": 10,
+    "max_concurrent_embeddings": 25,
+    "version": "latest",
+    "component": "kubernetes"
+  },
+  "metrics": {
+    "total_documents": 1410,
+    "total_chunks": 1410,
+    "total_time_seconds": 109.29217886924744,
+    "documents_per_second": 12.901197639099726,
+    "chunks_per_second": 12.901197639099726,
+    "avg_time_per_document": 0.0,
+    "avg_chunks_per_document": 1.0,
+    "loading_time": 0.574044942855835,
+    "embedding_time": 108.60679912567139,
+    "vector_store_time": 0,
+    "bm25_time": 0,
+    "chunking_time": 0,
+    "peak_memory_mb": null,
+    "avg_cpu_percent": null,
+    "num_workers": 8,
+    "batch_size": 10,
+    "parallel_mode": "parallel",
+    "errors": 419,
+    "error_rate": 0.29716312056737587
+  },
+  "document_times": {
+    "min": 0,
+    "max": 0,
+    "median": 0,
+    "p95": 0,
+    "p99": 0
+  }
+}
