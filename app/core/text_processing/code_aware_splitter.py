@@ -8,7 +8,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 class CodeAwareTextSplitter:
     """
     Text splitter that preserves code blocks, YAML configs, and technical structures.
-    Optimized for Kubernetes and Cilium documentation.
+    Optimized for Kubernetes documentation.
     """
 
     def __init__(

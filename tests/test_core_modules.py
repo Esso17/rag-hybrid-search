@@ -1,236 +1,326 @@
-"""
-Test core RAG modules with new structure
-"""
+"""Unit tests for core modules — no live Ollama/FAISS required."""
 
 import sys
 from pathlib import Path
 
 import pytest
 
-# Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
-class TestEmbeddingModule:
-    """Test embedding module"""
-
-    def test_embedding_imports(self):
-        """Test embedding module imports"""
-        from app.core.embedding import embed_batch_async, get_embedding_client, get_query_embedding
-
-        assert get_embedding_client is not None
-        assert embed_batch_async is not None
-        assert get_query_embedding is not None
-
-    def test_embedding_client_creation(self):
-        """Test embedding client can be created"""
-        from app.core.embedding import get_embedding_client
-
-        client = get_embedding_client()
-        assert client is not None
-        assert hasattr(client, "base_url")
-        assert hasattr(client, "model")
+# ── Config ─────────────────────────────────────────────────────────────────────
 
 
-class TestVectorStoresModule:
-    """Test vector stores module"""
+class TestConfig:
+    def test_settings_load(self):
+        from app.config import settings
 
-    def test_vector_stores_imports(self):
-        """Test vector stores module imports"""
+        assert settings.EMBEDDING_DIMENSION == 768
+        assert settings.FUSION_METHOD in ("rrf", "weighted")
+        assert isinstance(settings.USE_RERANKER, bool)
+        assert isinstance(settings.USE_CONTEXTUAL_PREFIX, bool)
+        assert settings.CACHE_MAX_SIZE > 0
+        assert 0.0 < settings.CACHE_SIMILARITY_THRESHOLD <= 1.0
+
+    def test_no_dead_keys(self):
+        """Removed config keys must not appear on settings."""
+        from app.config import settings
+
+        for dead in ("USE_ENHANCED_BM25", "USE_INVERTED_BM25", "FAISS_M", "FAISS_EF_CONSTRUCTION"):
+            assert not hasattr(settings, dead), f"Dead key still present: {dead}"
+
+
+# ── BM25 / Retrieval ───────────────────────────────────────────────────────────
+
+
+class TestBM25:
+    def test_imports(self):
+        from app.core.retrieval import BM25, BM25Index, get_bm25_index
+
+        assert BM25 is not None
+        assert BM25Index is not None
+        assert get_bm25_index is not None
+
+    def test_tokenize_preserves_k8s_terms(self):
+        from app.core.retrieval.bm25 import _tokenize
+
+        tokens = _tokenize("NetworkPolicy kubectl StatefulSet")
+        assert "networkpolicy" in tokens
+        assert "kubectl" in tokens
+        assert "statefulset" in tokens
+
+    def test_tokenize_camelcase_split(self):
+        from app.core.retrieval.bm25 import _tokenize
+
+        tokens = _tokenize("HorizontalPodAutoscaler")
+        assert "horizontal" in tokens or "horizontalpodautoscaler" in tokens
+
+    def test_bm25_add_and_search(self):
+        from app.core.retrieval.bm25 import BM25
+
+        bm25 = BM25()
+        bm25.add(["kubernetes pod networking service", "faiss vector search hnsw"])
+        results = bm25.search("kubernetes service", top_k=2)
+        assert len(results) > 0
+        idxs = [idx for idx, _ in results]
+        assert 0 in idxs  # first doc is more relevant
+
+    def test_bm25_inverted_index_efficiency(self):
+        """Inverted index: only candidate docs should be scored."""
+        from app.core.retrieval.bm25 import BM25
+
+        bm25 = BM25()
+        bm25.add(["kubernetes deployment rollout"] * 50 + ["unrelated content xyz"] * 50)
+        results = bm25.search("deployment rollout", top_k=5)
+        # All results should be the k8s docs (indices 0-49)
+        for idx, _ in results:
+            assert idx < 50
+
+    def test_bm25_index_add_and_search(self):
+        from app.core.retrieval.bm25 import BM25Index
+
+        index = BM25Index()
+        index.add_chunks(
+            ["Kubernetes Services provide stable networking", "Pods run containers"],
+            metadatas=[{"title": "Services"}, {"title": "Pods"}],
+        )
+        results = index.search("Kubernetes Services networking", top_k=1)
+        assert len(results) == 1
+        assert results[0]["content"] == "Kubernetes Services provide stable networking"
+        assert "score" in results[0]
+        assert "metadata" in results[0]
+
+
+# ── Vector Stores ──────────────────────────────────────────────────────────────
+
+
+class TestVectorStores:
+    def test_imports(self):
         from app.core.vector_stores import FAISS_AVAILABLE, get_in_memory_vector_store
 
-        assert get_in_memory_vector_store is not None
         assert isinstance(FAISS_AVAILABLE, bool)
+        assert get_in_memory_vector_store is not None
 
-    def test_in_memory_store_creation(self):
-        """Test in-memory store can be created"""
-        from app.config import settings
-        from app.core.vector_stores import get_in_memory_vector_store
-
-        store = get_in_memory_vector_store(dimension=settings.EMBEDDING_DIMENSION)
-        assert store is not None
-        assert store.dimension == settings.EMBEDDING_DIMENSION
-        assert hasattr(store, "add_points")
-        assert hasattr(store, "search")
-
-    def test_in_memory_store_operations(self):
-        """Test basic in-memory store operations"""
+    def test_in_memory_add_and_search(self):
         from app.config import settings
         from app.core.vector_stores import get_in_memory_vector_store
 
         dim = settings.EMBEDDING_DIMENSION
         store = get_in_memory_vector_store(dimension=dim)
-
-        # Add some dummy vectors
-        vectors = [[0.1] * dim, [0.2] * dim, [0.3] * dim]
-        payloads = [
-            {"content": "test1", "chunk_index": 0},
-            {"content": "test2", "chunk_index": 1},
-            {"content": "test3", "chunk_index": 2},
-        ]
+        vectors = [[float(i) / dim] * dim for i in range(3)]
+        payloads = [{"content": f"doc{i}", "chunk_index": i} for i in range(3)]
         store.add_points(vectors, payloads)
-
-        # Search
-        results = store.search([0.15] * dim, limit=2)
+        results = store.search(vectors[0], limit=2)
         assert len(results) == 2
         assert "payload" in results[0]
         assert "score" in results[0]
 
 
-class TestRetrievalModule:
-    """Test retrieval module (BM25)"""
-
-    def test_retrieval_imports(self):
-        """Test retrieval module imports"""
-        from app.core.retrieval import BM25Index, TechnicalTokenizer, get_bm25_index
-
-        assert get_bm25_index is not None
-        assert TechnicalTokenizer is not None
-        assert BM25Index is not None
-
-    def test_bm25_index_creation(self):
-        """Test BM25 index can be created"""
-        from app.core.retrieval import get_bm25_index
-
-        index = get_bm25_index()
-        assert index is not None
-        assert hasattr(index, "add_chunks")
-        assert hasattr(index, "search")
-
-    def test_technical_tokenizer(self):
-        """Test technical tokenizer"""
-        from app.core.retrieval import TechnicalTokenizer
-
-        tokenizer = TechnicalTokenizer()
-
-        # Test K8s terms
-        tokens = tokenizer.tokenize("NetworkPolicy kubectl cilium-agent")
-        assert "networkpolicy" in tokens or "network" in tokens
-        assert "kubectl" in tokens
-        assert "cilium" in tokens or "cilium-agent" in tokens
+# ── Score Fusion ───────────────────────────────────────────────────────────────
 
 
-class TestSearchModule:
-    """Test search module (enhanced fusion)"""
+class TestScoreFusion:
+    def test_rrf_combines_both_sources(self):
+        from app.core.search.score_fusion import reciprocal_rank_fusion
 
-    def test_search_imports(self):
-        """Test search module imports"""
-        from app.core.search import (
-            calculate_query_overlap,
-            enhanced_fusion,
-            has_exact_match,
-            hybrid_search,
-            reciprocal_rank_fusion,
-        )
+        v = {0: 0.9, 1: 0.8, 2: 0.7}
+        b = {0: 5.0, 2: 4.0, 3: 3.0}
+        scores = reciprocal_rank_fusion(v, b)
+        assert len(scores) == 4
+        assert all(s > 0 for s in scores.values())
+        # doc 0 is in both → should rank highest
+        assert scores[0] == max(scores.values())
 
-        assert hybrid_search is not None
-        assert reciprocal_rank_fusion is not None
-        assert enhanced_fusion is not None
-        assert calculate_query_overlap is not None
-        assert has_exact_match is not None
+    def test_rrf_union_of_keys(self):
+        from app.core.search.score_fusion import reciprocal_rank_fusion
 
-    def test_reciprocal_rank_fusion(self):
-        """Test RRF score fusion"""
-        from app.core.search import reciprocal_rank_fusion
-
-        vector_scores = {0: 0.9, 1: 0.8, 2: 0.7}
-        bm25_scores = {0: 5.0, 2: 4.0, 3: 3.0}
-
-        rrf_scores = reciprocal_rank_fusion(vector_scores, bm25_scores)
-
-        assert len(rrf_scores) == 4  # All unique indices
-        assert 0 in rrf_scores  # Present in both
-        assert 3 in rrf_scores  # Only in BM25
-        assert all(score > 0 for score in rrf_scores.values())
+        scores = reciprocal_rank_fusion({1: 0.5}, {2: 0.5})
+        assert 1 in scores and 2 in scores
 
     def test_query_overlap(self):
-        """Test query-document overlap calculation"""
-        from app.core.search import calculate_query_overlap
+        from app.core.search.score_fusion import calculate_query_overlap
 
         overlap = calculate_query_overlap(
-            "kubernetes pod networking", "Kubernetes uses CNI for pod networking and communication"
+            "kubernetes pod networking",
+            "Kubernetes uses CNI for pod networking and communication",
         )
-        assert 0 <= overlap <= 1
-        assert overlap > 0  # Should have some overlap
+        assert 0.0 <= overlap <= 1.0
+        assert overlap > 0.0
 
     def test_exact_match(self):
-        """Test exact match detection"""
-        from app.core.search import has_exact_match
+        from app.core.search.score_fusion import has_exact_match
 
         assert has_exact_match("kubernetes pod", "How to create a kubernetes pod in the cluster")
         assert not has_exact_match("kubernetes pod", "How to use K8s containers")
 
+    def test_normalize_and_combine(self):
+        from app.core.search.score_fusion import normalize_and_combine_scores
 
-class TestIndexingModule:
-    """Test indexing module"""
-
-    def test_indexing_imports(self):
-        """Test indexing module imports"""
-        from app.core.indexing import (
-            add_documents_batched,
-            add_documents_parallel,
-            process_document,
-        )
-
-        assert process_document is not None
-        assert add_documents_parallel is not None
-        assert add_documents_batched is not None
+        result = normalize_and_combine_scores({0: 0.9, 1: 0.5}, {0: 3.0, 2: 1.0})
+        assert len(result) == 3
+        assert all(0.0 <= v <= 1.0 for v in result.values())
 
 
-class TestGenerationModule:
-    """Test generation module"""
-
-    def test_generation_imports(self):
-        """Test generation module imports"""
-        from app.core.generation import generate_answer
-
-        assert generate_answer is not None
+# ── Text Processing ────────────────────────────────────────────────────────────
 
 
-class TestTextProcessingModule:
-    """Test text processing module"""
-
-    def test_text_processing_imports(self):
-        """Test text processing module imports"""
+class TestTextProcessing:
+    def test_code_aware_splitter(self):
         from app.core.text_processing import get_code_aware_splitter
 
-        assert get_code_aware_splitter is not None
+        splitter = get_code_aware_splitter(chunk_size=200, chunk_overlap=20)
+        text = (
+            "Kubernetes Pods are the smallest deployable units. "
+            "They wrap one or more containers that share storage and network.\n\n"
+            "```yaml\napiVersion: v1\nkind: Pod\nmetadata:\n  name: my-pod\n```\n\n"
+            "Services expose Pods via stable DNS names and IP addresses. "
+            "ClusterIP, NodePort, and LoadBalancer are the three main types."
+        )
+        chunks = splitter.split_text(text)
+        assert len(chunks) >= 1
+
+    def test_splitter_preserves_code_blocks(self):
+        from app.core.text_processing import get_code_aware_splitter
+
+        splitter = get_code_aware_splitter(
+            chunk_size=500, chunk_overlap=50, preserve_code_blocks=True
+        )
+        code = "```yaml\n" + "key: value\n" * 10 + "```"
+        chunks = splitter.split_text(code)
+        # At least one chunk should contain the yaml block intact
+        assert any("yaml" in c for c in chunks)
+
+
+# ── Embedding Cache ────────────────────────────────────────────────────────────
+
+
+class TestEmbeddingCache:
+    def test_normalize_query(self):
+        from app.core.embedding.cache import normalize_query
+
+        assert normalize_query("  Hello, World!  ") == "hello world"
+        assert (
+            normalize_query("kubectl get pods --all-namespaces")
+            == "kubectl get pods --all-namespaces"
+        )
+
+    def test_same_query_same_hash(self):
+        import hashlib
+
+        from app.core.embedding.cache import normalize_query
+
+        q1 = normalize_query("What is Kubernetes?")
+        q2 = normalize_query("What is Kubernetes?")
+        assert hashlib.sha256(q1.encode()).hexdigest() == hashlib.sha256(q2.encode()).hexdigest()
+
+    def test_cache_info(self):
+        from app.core.embedding.cache import get_embedding_cache_info
+
+        info = get_embedding_cache_info()
+        assert "max_size" in info
+        assert "hit_rate" in info
+        assert 0.0 <= info["hit_rate"] <= 1.0
+
+
+# ── Query-Response Cache ───────────────────────────────────────────────────────
+
+
+class TestQueryResponseCache:
+    def test_cache_miss_on_empty(self):
+        from app.core.cache.query_response_cache import QueryResponseCache
+
+        cache = QueryResponseCache(dimension=4, max_size=10, similarity_threshold=0.95)
+        assert cache.get([0.1, 0.2, 0.3, 0.4]) is None
+
+    def test_cache_hit_exact(self):
+        from app.core.cache.query_response_cache import QueryResponseCache
+
+        cache = QueryResponseCache(dimension=4, max_size=10, similarity_threshold=0.90)
+        emb = [1.0, 0.0, 0.0, 0.0]
+        cache.put("test query", emb, "test answer")
+        result = cache.get(emb)
+        assert result is not None
+        assert result["cache_hit"] is True
+        assert result["response"] == "test answer"
+
+    def test_cache_miss_dissimilar(self):
+        from app.core.cache.query_response_cache import QueryResponseCache
+
+        cache = QueryResponseCache(dimension=4, max_size=10, similarity_threshold=0.99)
+        cache.put("q", [1.0, 0.0, 0.0, 0.0], "answer")
+        assert cache.get([0.0, 1.0, 0.0, 0.0]) is None
+
+    def test_cache_stats(self):
+        from app.core.cache.query_response_cache import QueryResponseCache
+
+        cache = QueryResponseCache(dimension=4, max_size=5)
+        stats = cache.get_stats()
+        assert "total_entries" in stats
+        assert "semantic_enabled" in stats
+
+    def test_lru_eviction(self):
+        from app.core.cache.query_response_cache import QueryResponseCache
+
+        cache = QueryResponseCache(dimension=4, max_size=3)
+        for i in range(4):
+            emb = [float(i), 0.0, 0.0, 0.0]
+            cache.put(f"q{i}", emb, f"a{i}")
+        assert len(cache.cache) == 3  # evicted oldest
+
+
+# ── Evaluation ─────────────────────────────────────────────────────────────────
+
+
+class TestEvaluation:
+    def test_parse_fallback(self):
+        """_parse must handle malformed LLM output gracefully."""
+        from app.core.evaluation.evaluator import _parse
+
+        score, reason = _parse('{"score": 0.85, "reason": "Good answer"}')
+        assert score == pytest.approx(0.85)
+        assert "Good" in reason
+
+    def test_parse_regex_fallback(self):
+        from app.core.evaluation.evaluator import _parse
+
+        score, reason = _parse('score: 0.7 some text "reason": "ok"')
+        assert 0.0 <= score <= 1.0
+
+    def test_parse_out_of_range_clamped(self):
+        from app.core.evaluation.evaluator import _parse
+
+        score, _ = _parse('{"score": 1.5, "reason": ""}')
+        assert score <= 1.0
+        score, _ = _parse('{"score": -0.5, "reason": ""}')
+        assert score >= 0.0
+
+
+# ── RAG Pipeline ───────────────────────────────────────────────────────────────
 
 
 class TestRAGPipeline:
-    """Test main RAG pipeline"""
-
-    def test_rag_pipeline_creation(self):
-        """Test RAG pipeline can be created"""
+    def test_pipeline_attributes(self):
         from app.core.rag import get_rag_pipeline
 
         rag = get_rag_pipeline()
-        assert rag is not None
-
-    def test_rag_pipeline_has_enhanced_features(self):
-        """Test RAG pipeline has enhanced fusion features"""
-        from app.core.rag import get_rag_pipeline
-
-        rag = get_rag_pipeline()
-
-        # Check enhanced search methods
         assert hasattr(rag, "hybrid_search")
         assert hasattr(rag, "query")
         assert hasattr(rag, "add_document")
         assert hasattr(rag, "add_documents_parallel")
-        assert hasattr(rag, "add_documents_batched")
-
-    def test_rag_pipeline_attributes(self):
-        """Test RAG pipeline has correct attributes"""
-        from app.core.rag import get_rag_pipeline
-
-        rag = get_rag_pipeline()
-
+        assert hasattr(rag, "vector_store")  # property
+        assert hasattr(rag, "bm25_index")
         assert hasattr(rag, "use_faiss")
         assert hasattr(rag, "use_code_aware")
         assert hasattr(rag, "use_devops_prompts")
-        assert hasattr(rag, "text_splitter")
-        assert hasattr(rag, "bm25_index")
+
+    def test_vector_store_property(self):
+        from app.core.rag import get_rag_pipeline
+
+        rag = get_rag_pipeline()
+        store = rag.vector_store
+        assert store is not None
+        assert hasattr(store, "add_points")
+        assert hasattr(store, "search")
 
 
 if __name__ == "__main__":

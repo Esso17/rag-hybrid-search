@@ -1,4 +1,4 @@
-"""RAG pipeline with hybrid search, parallel processing, and K8s/Cilium optimizations"""
+"""RAG pipeline with hybrid search and parallel processing for Kubernetes documentation"""
 
 import asyncio
 import logging
@@ -11,7 +11,7 @@ import httpx
 from app.config import settings
 from app.core.cache import get_query_response_cache
 from app.core.embedding import embed_batch_async, get_embedding_client, get_query_embedding
-from app.core.retrieval import INVERTED_BM25_AVAILABLE, get_bm25_index, get_bm25_inverted_index
+from app.core.retrieval import get_bm25_index
 from app.core.vector_stores import (
     FAISS_AVAILABLE,
     get_faiss_vector_store,
@@ -52,30 +52,20 @@ class RAGPipeline:
 
         self.embedding_client = get_embedding_client()
 
-        # Phase 3: Use inverted BM25 if enabled (50-500x faster)
-        if settings.USE_INVERTED_BM25 and INVERTED_BM25_AVAILABLE:
-            self.bm25_index = get_bm25_inverted_index()
-            logger.info("Using BM25 with inverted index (50-500x faster)")
+        self.bm25_index = get_bm25_index()
+
+        # Text splitter
+        self.use_code_aware = settings.USE_CODE_AWARE_SPLITTING
+        if settings.USE_CODE_AWARE_SPLITTING:
+            from app.core.text_processing import get_code_aware_splitter
+
+            self.text_splitter = get_code_aware_splitter(
+                chunk_size=settings.CHUNK_SIZE,
+                chunk_overlap=settings.CHUNK_OVERLAP,
+                preserve_code_blocks=True,
+            )
+            logger.info("Using code-aware text splitter")
         else:
-            self.bm25_index = get_bm25_index()
-
-        # Text splitter - use code-aware if enabled
-        self.use_code_aware = getattr(settings, "USE_CODE_AWARE_SPLITTING", True)
-        if self.use_code_aware:
-            try:
-                from app.core.text_processing import get_code_aware_splitter
-
-                self.text_splitter = get_code_aware_splitter(
-                    chunk_size=settings.CHUNK_SIZE,
-                    chunk_overlap=settings.CHUNK_OVERLAP,
-                    preserve_code_blocks=True,
-                )
-                logger.info("Using code-aware text splitter")
-            except ImportError:
-                logger.warning("Code-aware splitter not available, using standard splitter")
-                self.use_code_aware = False
-
-        if not self.use_code_aware:
             from langchain_text_splitters import RecursiveCharacterTextSplitter
 
             self.text_splitter = RecursiveCharacterTextSplitter(
@@ -83,24 +73,21 @@ class RAGPipeline:
             )
             logger.info("Using standard text splitter")
 
-        # DevOps prompts - use if enabled
-        self.use_devops_prompts = getattr(settings, "USE_DEVOPS_PROMPTS", True)
-        if self.use_devops_prompts:
-            try:
-                from app.prompts.devops_prompts import build_devops_prompt
+        # Prompts
+        self.use_devops_prompts = settings.USE_DEVOPS_PROMPTS
+        if settings.USE_DEVOPS_PROMPTS:
+            from app.prompts.devops_prompts import build_devops_prompt
 
-                self.prompt_builder = build_devops_prompt
-                logger.info("Using DevOps-optimized prompts")
-            except ImportError:
-                logger.warning("DevOps prompts not available, using generic prompts")
-                self.use_devops_prompts = False
-                self.prompt_builder = None
+            self.prompt_builder = build_devops_prompt
+            logger.info("Using Kubernetes-optimized prompts")
+        else:
+            self.prompt_builder = None
 
         self._initialized = False
         self.llm_client = httpx.Client(timeout=120.0)
 
         # Query-response cache (semantic caching for 400x speedup on hits)
-        self.use_cache = getattr(settings, "USE_QUERY_RESPONSE_CACHE", True)
+        self.use_cache = settings.USE_QUERY_RESPONSE_CACHE
         if self.use_cache:
             try:
                 self.query_cache = get_query_response_cache()
@@ -114,6 +101,10 @@ class RAGPipeline:
                 self.use_cache = False
         else:
             self.query_cache = None
+
+    @property
+    def vector_store(self):
+        return self.faiss_store if self.use_faiss else self.in_memory_store
 
     def initialize(self):
         """Initialize vector database"""
@@ -139,13 +130,20 @@ class RAGPipeline:
         splitter_type = "code-aware" if self.use_code_aware else "standard"
         logger.info(f"Document '{title}' split into {len(chunks)} chunks ({splitter_type})")
 
-        # Generate embeddings for chunks (async batch for better performance)
+        # Contextual prefixing: embed "[title] chunk" for richer semantic signal.
+        # Stored content remains the original chunk (no prefix displayed to users).
+        if settings.USE_CONTEXTUAL_PREFIX:
+            chunks_for_embedding = [f"[{title}] {c}" for c in chunks]
+        else:
+            chunks_for_embedding = chunks
+
         def run_async_embeddings():
-            """Helper to run async embeddings in a fresh event loop"""
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                return loop.run_until_complete(embed_batch_async(chunks, max_concurrent=20))
+                return loop.run_until_complete(
+                    embed_batch_async(chunks_for_embedding, max_concurrent=20)
+                )
             finally:
                 loop.close()
 
@@ -177,8 +175,11 @@ class RAGPipeline:
         else:
             self.in_memory_store.add_points(embeddings, payloads)
 
-        # Add to BM25 index
-        self.bm25_index.add_chunks(chunks)
+        # Add to BM25 index — include per-chunk metadata so search results carry it
+        chunk_metadatas = [
+            {**(metadata or {}), "title": title, "document_id": doc_id} for _ in chunks
+        ]
+        self.bm25_index.add_chunks(chunks, metadatas=chunk_metadatas)
 
         return len(chunks)
 
@@ -208,12 +209,10 @@ class RAGPipeline:
 
         from app.core.indexing.batch_indexer import add_documents_parallel as batch_add_parallel
 
-        vector_store = self.faiss_store if self.use_faiss else self.in_memory_store
-
         return batch_add_parallel(
             documents=documents,
             text_splitter=self.text_splitter,
-            vector_store=vector_store,
+            vector_store=self.vector_store,
             bm25_index=self.bm25_index,
             use_faiss=self.use_faiss,
             num_workers=num_workers,
@@ -250,12 +249,10 @@ class RAGPipeline:
 
         from app.core.indexing.batch_indexer import add_documents_batched as batch_add_batched
 
-        vector_store = self.faiss_store if self.use_faiss else self.in_memory_store
-
         return batch_add_batched(
             documents=documents,
             text_splitter=self.text_splitter,
-            vector_store=vector_store,
+            vector_store=self.vector_store,
             bm25_index=self.bm25_index,
             use_faiss=self.use_faiss,
             batch_size=batch_size,
@@ -288,11 +285,9 @@ class RAGPipeline:
         """
         from app.core.search.hybrid_search import hybrid_search as perform_hybrid_search
 
-        vector_store = self.faiss_store if self.use_faiss else self.in_memory_store
-
         return perform_hybrid_search(
             query=query,
-            vector_store=vector_store,
+            vector_store=self.vector_store,
             bm25_index=self.bm25_index,
             top_k=top_k,
             use_faiss=self.use_faiss,
@@ -382,14 +377,10 @@ class RAGPipeline:
             )
         else:
             # Vector search only
-            vector_store = self.faiss_store if self.use_faiss else self.in_memory_store
-
+            search_kwargs = {"limit": top_k}
             if self.use_faiss:
-                vector_results = vector_store.search(
-                    query_embedding, limit=top_k, ef_search=settings.FAISS_EF_SEARCH
-                )
-            else:
-                vector_results = vector_store.search(query_embedding, limit=top_k)
+                search_kwargs["ef_search"] = settings.FAISS_EF_SEARCH
+            vector_results = self.vector_store.search(query_embedding, **search_kwargs)
 
             search_results = [
                 {

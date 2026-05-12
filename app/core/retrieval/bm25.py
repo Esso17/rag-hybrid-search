@@ -1,278 +1,188 @@
-"""BM25 keyword search with technical tokenization for K8s/Cilium"""
+"""BM25 with inverted index and technical tokenization for Kubernetes docs"""
 
+import json
 import logging
 import math
+import os
 import re
 from collections import defaultdict
-
-from app.config import settings
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+_PRESERVE = frozenset(
+    {
+        "kubectl",
+        "k8s",
+        "apiversion",
+        "namespace",
+        "deployment",
+        "pod",
+        "service",
+        "ingress",
+        "networkpolicy",
+        "configmap",
+        "secret",
+        "daemonset",
+        "statefulset",
+        "replicaset",
+        "horizontalpodautoscaler",
+        "persistentvolumeclaim",
+    }
+)
 
-class TechnicalTokenizer:
-    """Tokenizer optimized for technical documentation (K8s, Cilium, DevOps)"""
 
-    def __init__(self):
-        # Common K8s/Cilium terms to preserve
-        self.preserve_terms = {
-            "kubectl",
-            "k8s",
-            "cilium",
-            "apiversion",
-            "namespace",
-            "deployment",
-            "pod",
-            "service",
-            "ingress",
-            "networkpolicy",
-            "configmap",
-            "secret",
-            "daemonset",
-            "statefulset",
-            "ciliumnetworkpolicy",
-            "ciliumendpoint",
-            "hubble",
-        }
-
-    def tokenize(self, text: str) -> list[str]:
-        """
-        Tokenize text with awareness of technical terms.
-        Handles: CamelCase, kebab-case, dots, underscores
-        """
-        text_lower = text.lower()
-        tokens = []
-
-        # First, extract preserved terms
-        for term in self.preserve_terms:
-            if term in text_lower:
-                tokens.append(term)
-
-        # Split on whitespace and special chars
-        words = re.findall(r"\b[\w-]+\b", text_lower)
-
-        for word in words:
-            if word in self.preserve_terms:
-                continue
-            tokens.extend(self._tokenize_word(word))
-
-        # Remove duplicates while preserving order
-        seen = set()
-        unique_tokens = []
-        for token in tokens:
-            if token not in seen and len(token) > 1:
-                seen.add(token)
-                unique_tokens.append(token)
-
-        return unique_tokens
-
-    def _tokenize_word(self, word: str) -> list[str]:
-        """Tokenize a single word with technical awareness"""
-        tokens = [word]
-
-        # Handle kebab-case: cilium-agent -> [cilium-agent, cilium, agent]
+def _tokenize(text: str) -> list[str]:
+    """Technical-aware tokenizer: preserves Kubernetes terms, splits CamelCase/kebab/dots."""
+    text_lower = text.lower()
+    tokens = [t for t in _PRESERVE if t in text_lower]
+    seen = set(tokens)
+    for word in re.findall(r"\b[\w-]+\b", text_lower):
+        if word in seen:
+            continue
+        parts = [word]
         if "-" in word:
-            tokens.extend(word.split("-"))
-
-        # Handle dots: k8s.io -> [k8s.io, k8s, io]
+            parts += word.split("-")
         if "." in word:
-            tokens.extend(word.split("."))
-
-        # Handle underscores
+            parts += word.split(".")
         if "_" in word:
-            tokens.extend(word.split("_"))
-
-        # Handle CamelCase: NetworkPolicy -> [networkpolicy, network, policy]
+            parts += word.split("_")
         if re.search(r"[a-z][A-Z]", word):
-            camel_parts = re.sub("([A-Z])", r" \1", word).split()
-            tokens.extend([p.lower() for p in camel_parts])
-
-        # Handle version numbers
-        if re.match(r"v?\d+(\.\d+)*", word):
-            tokens.append(word)
-            version_parts = re.findall(r"\d+", word)
-            tokens.extend(version_parts)
-
-        return tokens
+            parts += [p.lower() for p in re.sub("([A-Z])", r" \1", word).split()]
+        for p in parts:
+            if len(p) > 1 and p not in seen:
+                seen.add(p)
+                tokens.append(p)
+    return tokens
 
 
 class BM25:
-    """BM25 ranking algorithm with optional technical tokenization"""
+    """BM25 with inverted index — O(candidates) search instead of O(corpus)."""
 
-    def __init__(self, k1: float = 1.5, b: float = 0.75, use_technical_tokenizer: bool = None):
-        """
-        Initialize BM25
-        k1: controls term frequency saturation
-        b: controls length normalization
-        use_technical_tokenizer: Use technical tokenization (auto from config if None)
-        """
-        self.k1 = k1
-        self.b = b
+    def __init__(self, k1: float = 1.5, b: float = 0.75):
+        self.k1, self.b = k1, b
+        self.tokenized_docs: list[list[str]] = []
+        self.doc_lens: list[int] = []
+        self.avg_doc_len: float = 0.0
+        self.corpus_size: int = 0
+        self.inverted: dict[str, dict[int, int]] = defaultdict(dict)
+        self.idf: dict[str, float] = {}
 
-        # Use technical tokenizer if enabled in config
-        if use_technical_tokenizer is None:
-            use_technical_tokenizer = getattr(settings, "USE_ENHANCED_BM25", True)
+    def _recalc_idf(self):
+        n = self.corpus_size
+        self.idf = {
+            t: math.log((n - len(d) + 0.5) / (len(d) + 0.5) + 1) for t, d in self.inverted.items()
+        }
 
-        self.use_technical_tokenizer = use_technical_tokenizer
-        self.tokenizer = TechnicalTokenizer() if use_technical_tokenizer else None
-
-        self.doc_freqs = []
-        self.idf = {}
-        self.avg_doc_len = 0
-        self.doc_lens = []
-        self.tokenized_docs = []
-        self.corpus_size = 0
-
-    def _tokenize(self, text: str) -> list[str]:
-        """Tokenize text using configured tokenizer"""
-        if self.use_technical_tokenizer and self.tokenizer:
-            return self.tokenizer.tokenize(text)
-        else:
-            # Simple tokenization (original)
-            return text.lower().split()
-
-    def fit(self, corpus: list[str]):
-        """Build BM25 index from corpus"""
-        self.corpus_size = len(corpus)
-
-        # Tokenize documents
-        self.tokenized_docs = [self._tokenize(doc) for doc in corpus]
-        self.doc_lens = [len(doc) for doc in self.tokenized_docs]
-        self.avg_doc_len = sum(self.doc_lens) / len(self.doc_lens) if self.doc_lens else 0
-
-        # Calculate document frequencies and IDF
-        doc_freq = defaultdict(int)
-        for doc in self.tokenized_docs:
-            unique_tokens = set(doc)
-            for token in unique_tokens:
-                doc_freq[token] += 1
-
-        # Calculate IDF values
-        for token, freq in doc_freq.items():
-            self.idf[token] = math.log((self.corpus_size - freq + 0.5) / (freq + 0.5) + 1)
-
-        tokenizer_type = "technical" if self.use_technical_tokenizer else "simple"
-        logger.info(
-            f"BM25 index built: {self.corpus_size} docs, {len(self.idf)} unique terms ({tokenizer_type} tokenization)"
-        )
-
-    def add_documents_incremental(self, new_docs: list[str]):
-        """
-        Add new documents to existing index without full rebuild (10-100x faster)
-        """
-        if not new_docs:
-            return
-
-        # Track document frequencies for IDF calculation
-        doc_freq = defaultdict(int)
-
-        # First pass: count existing document frequencies
-        if self.tokenized_docs:
-            for doc in self.tokenized_docs:
-                unique_tokens = set(doc)
-                for token in unique_tokens:
-                    doc_freq[token] += 1
-
-        # Tokenize and add new documents
-        new_tokenized = [self._tokenize(doc) for doc in new_docs]
-        new_lens = [len(doc) for doc in new_tokenized]
-
-        # Update document frequencies with new docs
-        for doc in new_tokenized:
-            unique_tokens = set(doc)
-            for token in unique_tokens:
-                doc_freq[token] += 1
-
-        # Extend index
-        self.tokenized_docs.extend(new_tokenized)
-        self.doc_lens.extend(new_lens)
+    def add(self, docs: list[str]):
+        start = len(self.tokenized_docs)
+        tokenized = [_tokenize(d) for d in docs]
+        self.tokenized_docs.extend(tokenized)
+        self.doc_lens.extend(len(t) for t in tokenized)
         self.corpus_size = len(self.tokenized_docs)
-
-        # Recalculate average document length
-        self.avg_doc_len = sum(self.doc_lens) / len(self.doc_lens) if self.doc_lens else 0
-
-        # Recalculate IDF values (only this part is O(unique_tokens))
-        self.idf.clear()
-        for token, freq in doc_freq.items():
-            self.idf[token] = math.log((self.corpus_size - freq + 0.5) / (freq + 0.5) + 1)
-
-        tokenizer_type = "technical" if self.use_technical_tokenizer else "simple"
-        logger.info(
-            f"BM25 index updated incrementally: {self.corpus_size} total docs (+{len(new_docs)} new), "
-            f"{len(self.idf)} unique terms ({tokenizer_type} tokenization)"
-        )
+        self.avg_doc_len = sum(self.doc_lens) / self.corpus_size if self.corpus_size else 0.0
+        for i, tokens in enumerate(tokenized, start):
+            tf: dict[str, int] = defaultdict(int)
+            for t in tokens:
+                tf[t] += 1
+            for token, freq in tf.items():
+                self.inverted[token][i] = freq
+        self._recalc_idf()
 
     def search(self, query: str, top_k: int = 5) -> list[tuple[int, float]]:
-        """
-        Search for query and return top-k document indices with scores
-        Returns: List of (doc_index, score) tuples
-        """
         if not self.tokenized_docs:
             return []
-
-        query_tokens = self._tokenize(query)
-        scores = [0.0] * self.corpus_size
-
-        for token in query_tokens:
-            idf_score = self.idf.get(token, 0)
-
-            for doc_idx, doc_tokens in enumerate(self.tokenized_docs):
-                token_freq = doc_tokens.count(token)
-                if token_freq > 0:
-                    # BM25 formula
-                    numerator = idf_score * token_freq * (self.k1 + 1)
-                    denominator = token_freq + self.k1 * (
-                        1 - self.b + self.b * (self.doc_lens[doc_idx] / self.avg_doc_len)
+        q_tokens = _tokenize(query)
+        candidates: set[int] = set()
+        for t in q_tokens:
+            candidates.update(self.inverted.get(t, {}).keys())
+        if not candidates:
+            return []
+        k1, b, avdl = self.k1, self.b, self.avg_doc_len or 1.0
+        scores: dict[int, float] = {}
+        for doc_idx in candidates:
+            dl = self.doc_lens[doc_idx]
+            s = 0.0
+            for token in q_tokens:
+                tf = self.inverted.get(token, {}).get(doc_idx, 0)
+                if tf:
+                    s += (
+                        self.idf.get(token, 0) * tf * (k1 + 1) / (tf + k1 * (1 - b + b * dl / avdl))
                     )
-                    scores[doc_idx] += numerator / denominator
-
-        # Return top-k with scores
-        results = [(idx, score) for idx, score in enumerate(scores) if score > 0]
-        results.sort(key=lambda x: x[1], reverse=True)
-        return results[:top_k]
+            if s > 0:
+                scores[doc_idx] = s
+        return sorted(scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
 
 
 class BM25Index:
-    """Wrapper for managing BM25 index of document chunks"""
+    """Manages a BM25 index over document chunks with disk persistence."""
 
-    def __init__(self, use_technical_tokenizer: bool = None):
-        """
-        Initialize BM25 index
-        use_technical_tokenizer: Use technical tokenization (auto from config if None)
-        """
+    def __init__(self):
         self.chunks: list[str] = []
-        self.bm25 = BM25(use_technical_tokenizer=use_technical_tokenizer)
+        self.chunk_metadata: list[dict] = []
+        self.bm25 = BM25()
 
-    def add_chunks(self, chunks: list[str]):
-        """Add chunks to index (uses incremental update for performance)"""
+    def add_chunks(self, chunks: list[str], metadatas: list[dict] | None = None):
+        prev = len(self.chunks)
         self.chunks.extend(chunks)
-        # Use incremental update if index already exists, otherwise do full fit
-        if self.bm25.tokenized_docs:
-            self.bm25.add_documents_incremental(chunks)
-        else:
-            self.bm25.fit(self.chunks)
+        self.chunk_metadata.extend(
+            metadatas if metadatas and len(metadatas) == len(chunks) else [{}] * len(chunks)
+        )
+        self.bm25.add(chunks)
+        if len(self.chunks) // 100 > prev // 100:
+            self.save()
 
     def search(self, query: str, top_k: int = 5) -> list[dict]:
-        """Search chunks by keyword"""
-        results = self.bm25.search(query, top_k=top_k)
         return [
-            {"chunk_index": idx, "content": self.chunks[idx], "score": score}
-            for idx, score in results
+            {
+                "chunk_index": idx,
+                "content": self.chunks[idx],
+                "score": score,
+                "metadata": self.chunk_metadata[idx] if idx < len(self.chunk_metadata) else {},
+            }
+            for idx, score in self.bm25.search(query, top_k)
         ]
 
     def reset(self):
-        """Clear index"""
-        self.chunks = []
-        self.bm25 = BM25(use_technical_tokenizer=self.bm25.use_technical_tokenizer)
+        self.chunks, self.chunk_metadata, self.bm25 = [], [], BM25()
+
+    def save(self, data_dir: str = "/app/data"):
+        try:
+            Path(data_dir).mkdir(parents=True, exist_ok=True)
+            with open(os.path.join(data_dir, "bm25_index.json"), "w") as f:
+                json.dump({"chunks": self.chunks, "chunk_metadata": self.chunk_metadata}, f)
+            logger.info(f"BM25 saved: {len(self.chunks)} chunks")
+        except Exception as e:
+            logger.error(f"BM25 save failed: {e}")
+
+    def load(self, data_dir: str = "/app/data") -> bool:
+        try:
+            path = os.path.join(data_dir, "bm25_index.json")
+            if not os.path.exists(path):
+                return False
+            with open(path) as f:
+                data = json.load(f)
+            self.chunks = data["chunks"]
+            self.chunk_metadata = data.get("chunk_metadata", [{}] * len(self.chunks))
+            if self.chunks:
+                self.bm25.add(self.chunks)
+            logger.info(f"BM25 loaded: {len(self.chunks)} chunks")
+            return True
+        except Exception as e:
+            logger.error(f"BM25 load failed: {e}")
+            return False
 
 
-# Global BM25 index
-_bm25_index = None
+_bm25_index: BM25Index | None = None
 
 
 def get_bm25_index() -> BM25Index:
-    """Get or create global BM25 index with config-based tokenization"""
     global _bm25_index
     if _bm25_index is None:
         _bm25_index = BM25Index()
+        _bm25_index.load()
     return _bm25_index
+
+
+# Aliases kept for backward compatibility
+get_bm25_inverted_index = get_bm25_index

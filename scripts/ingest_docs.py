@@ -12,8 +12,8 @@ Usage:
     # Via API (useful for remote server)
     python scripts/ingest_docs.py --source data/docs/kubernetes --api
 
-    # Multiple sources
-    python scripts/ingest_docs.py --source data/docs/kubernetes --source data/docs/cilium
+    # Multiple directories
+    python scripts/ingest_docs.py --source data/docs/kubernetes --source data/docs/kubernetes-blog
 
     # Custom settings
     python scripts/ingest_docs.py --source ~/docs --batch-size 10 --workers 2
@@ -52,7 +52,7 @@ def load_docs_from_path(docs_path: Path, source_name: str) -> list[dict]:
 
     Args:
         docs_path: Path to file or directory
-        source_name: Name to identify the source (e.g., "Kubernetes", "Cilium")
+        source_name: Name to identify the source (e.g., "Kubernetes")
 
     Returns:
         List of document dictionaries
@@ -159,7 +159,7 @@ def ingest_via_api(
 
         try:
             response = requests.post(
-                f"{API_URL}/add-documents-batch",
+                f"{API_URL}/documents",
                 json={
                     "documents": batch,
                     "num_workers": num_workers,
@@ -307,6 +307,7 @@ def ingest_via_pipeline(
 
 
 def main():
+    global API_URL
     parser = argparse.ArgumentParser(
         description="Ingest documents into RAG system",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -319,7 +320,7 @@ Examples:
   python scripts/ingest_docs.py --source data/docs/kubernetes --api
 
   # Multiple sources
-  python scripts/ingest_docs.py --source data/docs/kubernetes --source data/docs/cilium
+  python scripts/ingest_docs.py --source data/docs/kubernetes --source data/docs/kubernetes-blog
 
   # Conservative settings (prevent Ollama overload)
   python scripts/ingest_docs.py --source ~/docs --batch-size 5 --workers 1 --concurrent 2
@@ -335,7 +336,7 @@ Examples:
     parser.add_argument(
         "--name",
         action="append",
-        help="Source name (e.g., 'Kubernetes', 'Cilium'). Defaults to directory name.",
+        help="Source name (e.g., 'Kubernetes'). Defaults to directory name.",
     )
     parser.add_argument(
         "--api",
@@ -369,7 +370,6 @@ Examples:
     args = parser.parse_args()
 
     # Update API URL if specified
-    global API_URL
     API_URL = args.api_url
 
     # Validate sources

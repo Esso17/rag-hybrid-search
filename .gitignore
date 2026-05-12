@@ -15,6 +15,7 @@ lib64/
 parts/
 sdist/
 var/
+ARTICLE.md
 wheels/
 pip-wheel-metadata/
 share/python-wheels/
@@ -61,3 +62,4 @@ docs/
 
 # Benchmark results (optional, can be regenerated)
 benchmark_results/
+benchmarks/*.json

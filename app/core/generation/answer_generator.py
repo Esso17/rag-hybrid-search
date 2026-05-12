@@ -38,6 +38,11 @@ def generate_answer(
         context = "\n\n".join(context_chunks)
         prompt = f"""Based on the following context, provide a comprehensive answer to the question.
 
+FORMATTING RULES (mandatory):
+- Use markdown formatting.
+- Wrap ALL code, YAML, shell commands in fenced code blocks with the correct language tag (```yaml, ```bash, etc.).
+- Never output raw code outside a fenced block.
+
 Context:
 {context}
 

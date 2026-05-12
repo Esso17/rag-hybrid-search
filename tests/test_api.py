@@ -1,5 +1,6 @@
 """
-Test API endpoints
+API endpoint tests using FastAPI TestClient.
+No live Ollama or FAISS required — responses are validated structurally.
 """
 
 import sys
@@ -8,186 +9,326 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-# Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.main import app
 
-client = TestClient(app)
+client = TestClient(app, raise_server_exceptions=False)
 
 
-def test_root_endpoint():
-    """Test root endpoint returns correct info"""
-    response = client.get("/")
-    assert response.status_code == 200
-    data = response.json()
+# ── Infrastructure ─────────────────────────────────────────────────────────────
+
+
+def test_root():
+    r = client.get("/")
+    assert r.status_code == 200
+    data = r.json()
     assert "name" in data
-    assert "version" in data
     assert "endpoints" in data
-    assert "features" in data
+    endpoints = data["endpoints"]
+    assert "ingest" in endpoints
+    assert "evaluate" in endpoints
+    assert "feedback" not in endpoints
 
 
-def test_health_endpoint():
-    """Test health check endpoint"""
-    response = client.get("/health")
-    assert response.status_code == 200
-    data = response.json()
+def test_health():
+    r = client.get("/health")
+    assert r.status_code == 200
+    data = r.json()
     assert "status" in data
+    assert "vector_store_connected" in data
     assert "llm_available" in data
     assert "version" in data
 
 
-def test_stats_endpoint():
-    """Test stats endpoint"""
-    response = client.get("/stats")
-    assert response.status_code == 200
-    data = response.json()
+def test_stats():
+    r = client.get("/stats")
+    assert r.status_code == 200
+    data = r.json()
     assert "vector_backend" in data
     assert "vector_store" in data
     assert "bm25" in data
+    assert "cache" in data
     assert "config" in data
+    cfg = data["config"]
+    assert "fusion_method" in cfg
+    assert "use_heuristics" in cfg
 
 
-def test_add_document():
-    """Test adding a single document"""
-    response = client.post(
-        "/add-document",
-        json={
-            "title": "Test Document",
-            "content": "This is a test document about Kubernetes networking and pod communication.",
-            "metadata": {"source": "test"},
-        },
-    )
-    assert response.status_code == 200
-    data = response.json()
-    assert "doc_id" in data
-    assert "chunk_count" in data
-    assert data["status"] == "added"
-    assert data["chunk_count"] > 0
+# ── Document ingestion ─────────────────────────────────────────────────────────
 
 
-def test_add_documents_batch():
-    """Test batch document upload"""
-    response = client.post(
-        "/add-documents-batch",
+def test_ingest_single_doc():
+    r = client.post(
+        "/documents",
         json={
             "documents": [
                 {
-                    "title": "Doc 1",
-                    "content": "Kubernetes is a container orchestration platform for managing containerized applications.",
-                    "metadata": {"source": "test1"},
+                    "title": "Test K8s Services",
+                    "content": "A Kubernetes Service is an abstraction over a set of Pods providing stable networking.",
+                    "metadata": {"source": "test"},
+                }
+            ]
+        },
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert data["total_documents"] == 1
+    assert data["successful"] == 1
+    assert data["errors"] == 0
+    assert data["total_chunks"] >= 1
+
+
+def test_ingest_batch():
+    r = client.post(
+        "/documents",
+        json={
+            "documents": [
+                {
+                    "title": "Doc A",
+                    "content": "Kubernetes NetworkPolicy controls ingress and egress traffic between pods.",
                 },
                 {
-                    "title": "Doc 2",
-                    "content": "Cilium provides eBPF-based networking and security for Kubernetes clusters.",
-                    "metadata": {"source": "test2"},
+                    "title": "Doc B",
+                    "content": "FAISS provides approximate nearest-neighbour search using HNSW graphs.",
                 },
             ],
             "num_workers": 2,
-            "max_concurrent_embeddings": 10,
+            "max_concurrent_embeddings": 5,
         },
     )
-    assert response.status_code == 200
-    data = response.json()
+    assert r.status_code == 200
+    data = r.json()
     assert data["total_documents"] == 2
-    assert data["successful"] >= 0
-    assert data["total_chunks"] >= 0
+    assert data["successful"] == 2
+    assert data["total_chunks"] >= 2
     assert "processing_time" in data
 
 
-def test_search_basic():
-    """Test basic search endpoint"""
-    # First add a document
-    client.post(
-        "/add-document",
-        json={
-            "title": "Networking Guide",
-            "content": "Kubernetes networking uses CNI plugins for pod-to-pod communication.",
-            "metadata": {},
-        },
-    )
+def test_ingest_missing_content_field():
+    r = client.post("/documents", json={"documents": [{"title": "No content"}]})
+    assert r.status_code == 422
 
-    # Then search
-    response = client.post("/search", json={"query": "kubernetes networking", "top_k": 3})
-    assert response.status_code == 200
-    data = response.json()
+
+def test_upload_document(tmp_path):
+    f = tmp_path / "k8s.txt"
+    f.write_text("Kubernetes Deployments manage replica sets and rolling updates.")
+    with open(f, "rb") as fp:
+        r = client.post(
+            "/documents/upload",
+            files={"file": ("k8s.txt", fp, "text/plain")},
+            data={"title": "K8s Deployments"},
+        )
+    assert r.status_code == 200
+    data = r.json()
+    assert data["status"] == "uploaded"
+    assert data["title"] == "K8s Deployments"
+    assert data["chunk_count"] >= 1
+
+
+# ── Search ─────────────────────────────────────────────────────────────────────
+
+
+def test_search_default():
+    r = client.post("/search", json={"query": "Kubernetes networking"})
+    assert r.status_code == 200
+    data = r.json()
     assert "query" in data
     assert "results" in data
     assert "total_results" in data
 
 
-def test_search_enhanced():
-    """Test enhanced search with fusion options"""
-    response = client.post(
-        "/search/enhanced",
+def test_search_with_fusion_options():
+    r = client.post(
+        "/search",
         json={
-            "query": "pod networking",
-            "top_k": 5,
+            "query": "Kubernetes ingress controller",
+            "top_k": 3,
+            "fusion_method": "weighted",
+            "use_heuristics": False,
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["total_results"] <= 3
+
+
+def test_search_result_schema():
+    r = client.post("/search", json={"query": "pod networking", "top_k": 2})
+    assert r.status_code == 200
+    for result in r.json()["results"]:
+        assert "content" in result
+        assert "score" in result
+        assert "document_id" in result
+        assert "chunk_index" in result
+        assert "source" in result
+
+
+# ── Query (RAG) ────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.slow
+def test_query_response_schema():
+    r = client.post("/query", json={"query": "What is a Kubernetes Service?"})
+    assert r.status_code == 200
+    data = r.json()
+    assert "query" in data
+    assert "answer" in data
+    assert "sources" in data
+    assert "generation_time" in data
+    assert "cache_hit" in data
+
+
+@pytest.mark.slow
+def test_query_cache_hit():
+    q = {"query": "Explain Kubernetes StatefulSet test unique query string 42"}
+    client.post("/query", json=q)  # prime cache
+    r = client.post("/query", json=q)
+    assert r.status_code == 200
+    data = r.json()
+    assert data["cache_hit"] is True
+    assert data["generation_time"] < 0.1
+
+
+@pytest.mark.slow
+def test_query_fusion_options():
+    r = client.post(
+        "/query",
+        json={
+            "query": "How to debug a crashlooping pod?",
             "fusion_method": "rrf",
             "use_heuristics": True,
-            "boost_config": {"exact_match_boost": 0.2},
+            "top_k": 3,
         },
     )
-    assert response.status_code == 200
-    data = response.json()
-    assert "query" in data
-    assert "results" in data
+    assert r.status_code == 200
+    assert "answer" in r.json()
 
 
-def test_query_basic():
-    """Test basic query endpoint (search + LLM)"""
-    # Add a document first
-    client.post(
-        "/add-document",
+# ── Compare ────────────────────────────────────────────────────────────────────
+
+
+def test_query_compare_default():
+    r = client.post("/query/compare", json={"query": "What is a Kubernetes Deployment?"})
+    assert r.status_code == 200
+    data = r.json()
+    assert len(data["results"]) == 3
+    for result in data["results"]:
+        assert "strategy_name" in result
+        assert "answer" in result
+        assert "latency_ms" in result
+        assert "cache_hit" in result
+
+
+def test_query_compare_custom():
+    r = client.post(
+        "/query/compare",
         json={
-            "title": "K8s Pods",
-            "content": "A Pod is the smallest deployable unit in Kubernetes. It can contain one or more containers.",
-            "metadata": {},
+            "query": "Kubernetes pod lifecycle",
+            "strategies": [
+                {"name": "RRF", "use_hybrid": True, "fusion_method": "rrf", "use_heuristics": True},
+                {"name": "Vector", "use_hybrid": False},
+            ],
         },
     )
-
-    # Note: This will fail if Ollama is not running, so we just check the endpoint exists
-    response = client.post("/query", json={"query": "what is a pod?", "top_k": 3})
-    # Could be 200 (success) or 500 (LLM not available)
-    assert response.status_code in [200, 500]
+    assert r.status_code == 200
+    assert len(r.json()["results"]) == 2
 
 
-def test_query_enhanced():
-    """Test enhanced query endpoint"""
-    response = client.post(
-        "/query/enhanced",
-        json={"query": "explain pods", "top_k": 3, "fusion_method": "rrf", "use_heuristics": True},
+# ── Agentic ────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.slow
+def test_query_agentic_schema():
+    r = client.post(
+        "/query/agentic",
+        json={
+            "query": "How does Kubernetes handle rolling updates vs blue-green deployments?",
+            "max_iterations": 1,
+            "top_k": 3,
+        },
     )
-    # Could be 200 (success) or 500 (LLM not available)
-    assert response.status_code in [200, 500]
+    assert r.status_code == 200
+    data = r.json()
+    assert "answer" in data
+    assert isinstance(data["sub_questions"], list)
+    assert "iterations" in data
+    assert "final_complete" in data
+    assert 0.0 <= data["final_confidence"] <= 1.0
+    assert "generation_time" in data
 
 
-def test_upload_document(tmp_path):
-    """Test file upload endpoint"""
-    # Create a temporary text file
-    test_file = tmp_path / "test.txt"
-    test_file.write_text("This is a test file for upload.")
-
-    with open(test_file, "rb") as f:
-        response = client.post(
-            "/upload-document",
-            files={"file": ("test.txt", f, "text/plain")},
-            data={"title": "Uploaded Test"},
-        )
-
-    assert response.status_code == 200
-    data = response.json()
-    assert "doc_id" in data
-    assert "chunk_count" in data
-    assert data["status"] == "uploaded"
+def test_query_agentic_max_iterations_validation():
+    r = client.post("/query/agentic", json={"query": "test", "max_iterations": 10})
+    assert r.status_code == 422
 
 
-def test_invalid_query():
-    """Test that invalid queries are handled gracefully"""
-    response = client.post("/search", json={"query": ""})  # Empty query
-    # Should still return 200 with empty results or handle gracefully
-    assert response.status_code in [200, 422, 500]
+# ── Evaluate ───────────────────────────────────────────────────────────────────
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+def test_evaluate_presupplied():
+    r = client.post(
+        "/evaluate",
+        json={
+            "query": "What is a Kubernetes Service?",
+            "answer": "A Kubernetes Service provides stable networking to a set of Pods via label selectors.",
+            "context": [
+                "A Service is an abstraction that defines a logical set of Pods and a policy to access them.",
+            ],
+        },
+    )
+    assert r.status_code == 200
+    data = r.json()
+    m = data["metrics"]
+    assert 0.0 <= m["faithfulness"] <= 1.0
+    assert 0.0 <= m["answer_relevance"] <= 1.0
+    assert 0.0 <= m["context_relevance"] <= 1.0
+    assert 0.0 <= m["overall_score"] <= 1.0
+    assert data["rag_time"] == 0.0
+    assert "details" in data
+
+
+def test_evaluate_end_to_end():
+    r = client.post("/evaluate", json={"query": "What is FAISS HNSW?", "top_k": 3})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["rag_time"] > 0
+    assert data["eval_time"] > 0
+    assert "answer" in data
+
+
+def test_evaluate_hallucination_detection():
+    r = client.post(
+        "/evaluate",
+        json={
+            "query": "What is a Kubernetes Pod?",
+            "answer": "A Pod is a blockchain node using quantum networking on GPU clusters.",
+            "context": [
+                "A Pod is the smallest deployable unit in Kubernetes wrapping one or more containers."
+            ],
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["metrics"]["faithfulness"] <= 0.5
+
+
+# ── Removed endpoints must 404 ─────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "method,path",
+    [
+        ("POST", "/feedback"),
+        ("GET", "/feedback"),
+        ("POST", "/add-document"),
+        ("POST", "/add-documents-batch"),
+        ("POST", "/upload-document"),
+        ("POST", "/search/enhanced"),
+        ("POST", "/query/enhanced"),
+    ],
+)
+def test_removed_endpoints_return_404(method, path):
+    if method.upper() == "GET":
+        r = client.get(path)
+    else:
+        r = getattr(client, method.lower())(path, json={})
+    assert r.status_code == 404

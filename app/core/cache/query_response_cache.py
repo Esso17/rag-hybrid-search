@@ -373,9 +373,9 @@ def get_query_response_cache() -> QueryResponseCache:
     if _query_response_cache is None:
         _query_response_cache = QueryResponseCache(
             dimension=settings.EMBEDDING_DIMENSION,
-            max_size=getattr(settings, "CACHE_MAX_SIZE", 1000),
-            similarity_threshold=getattr(settings, "CACHE_SIMILARITY_THRESHOLD", 0.95),
-            ttl_seconds=getattr(settings, "CACHE_TTL_SECONDS", 3600),
+            max_size=settings.CACHE_MAX_SIZE,
+            similarity_threshold=settings.CACHE_SIMILARITY_THRESHOLD,
+            ttl_seconds=settings.CACHE_TTL_SECONDS,
         )
         # Try to load from disk
         _query_response_cache.load()

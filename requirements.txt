@@ -17,3 +17,10 @@ pyyaml>=6.0.1
 
 # Vector store (FAISS for fast similarity search)
 faiss-cpu>=1.7.4
+
+# Observability
+prometheus-client>=0.19.0
+ollama>=0.1.0
+
+# Reranking (cross-encoder, ~67MB, CPU-only)
+sentence-transformers>=3.0.0

@@ -1,149 +1,130 @@
-.PHONY: help build run stop clean deploy-minikube undeploy-minikube test logs shell
+# ── RAG Hybrid Search — Minikube deployment ────────────────────────────────────
+# Prerequisites: minikube, kubectl, docker, python 3.11+, ollama
+# Quick start:  make setup && make deploy && make ingest && make test
 
-# Colors for output
-RED=\033[0;31m
-GREEN=\033[0;32m
-YELLOW=\033[1;33m
-NC=\033[0m # No Color
+API_URL    ?= http://localhost:8000
+DOCS_K8S   ?= data/docs/kubernetes
+BATCH_SIZE ?= 5
+WORKERS    ?= 1
+CONCURRENT ?= 2
 
-help: ## Show this help message
-	@echo "$(GREEN)RAG Hybrid Search - Available Commands$(NC)"
-	@echo ""
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(YELLOW)%-20s$(NC) %s\n", $$1, $$2}'
-	@echo ""
+# ── Local / Docker Compose ─────────────────────────────────────────────────────
 
-# Local Development
-build: ## Build Docker image locally
-	@echo "$(YELLOW)Building Docker image...$(NC)"
-	docker build -t rag-hybrid-search:latest .
-	@echo "$(GREEN)✓ Build complete$(NC)"
+.PHONY: install
+install:                          ## Install Python dependencies
+	pip install -r requirements.txt
 
-run: ## Run with docker-compose
-	@echo "$(YELLOW)Starting services with docker-compose...$(NC)"
-	docker-compose up -d
-	@echo "$(GREEN)✓ Services started$(NC)"
-	@echo "API: http://localhost:8000"
-	@echo "Docs: http://localhost:8000/docs"
+.PHONY: models
+models:                           ## Pull required Ollama models (run once)
+	ollama pull phi3.5:3.8b
+	ollama pull nomic-embed-text
 
-stop: ## Stop docker-compose services
-	@echo "$(YELLOW)Stopping services...$(NC)"
-	docker-compose down
-	@echo "$(GREEN)✓ Services stopped$(NC)"
+.PHONY: up
+up:                               ## Start the API with Docker Compose
+	docker compose up -d
 
-clean: ## Clean up docker resources
-	@echo "$(YELLOW)Cleaning up...$(NC)"
-	docker-compose down -v
-	docker rmi rag-hybrid-search:latest 2>/dev/null || true
-	@echo "$(GREEN)✓ Cleanup complete$(NC)"
+.PHONY: down
+down:                             ## Stop the API
+	docker compose down
 
-logs: ## View docker-compose logs
-	docker-compose logs -f rag-api
+.PHONY: logs-compose
+logs-compose:                     ## Tail Docker Compose logs
+	docker compose logs -f
 
-restart: stop run ## Restart docker-compose services
+# ── Minikube ───────────────────────────────────────────────────────────────────
 
-rebuild: ## Rebuild and restart
-	docker-compose up -d --build
+.PHONY: minikube-start
+minikube-start:                   ## Start Minikube (4 CPU, 8 GB RAM)
+	minikube start --cpus=4 --memory=8192 --disk-size=40g
 
-# Minikube Deployment
-minikube-start: ## Start Minikube
-	@echo "$(YELLOW)Starting Minikube...$(NC)"
-	minikube start --memory=4096 --cpus=2
-	@echo "$(GREEN)✓ Minikube started$(NC)"
-
-deploy-minikube: ## Deploy to Minikube
-	@echo "$(YELLOW)Deploying to Minikube...$(NC)"
-	cd k8s && ./deploy.sh
-
-undeploy-minikube: ## Remove from Minikube
-	@echo "$(YELLOW)Removing from Minikube...$(NC)"
-	cd k8s && ./undeploy.sh
-
-minikube-status: ## Show Minikube deployment status
-	@echo "$(GREEN)Minikube Resources:$(NC)"
-	kubectl get all -n rag-hybrid-search
-
-minikube-logs: ## View Minikube pod logs
-	kubectl logs -f deployment/rag-api -n rag-hybrid-search
-
-minikube-url: ## Get Minikube service URL
-	@echo "$(GREEN)Service URL:$(NC)"
-	@minikube service rag-api-service -n rag-hybrid-search --url
-
-minikube-dashboard: ## Open Kubernetes dashboard
-	minikube dashboard
-
-# Development
-setup: ## Install Python dependencies
-	@echo "$(YELLOW)Installing dependencies...$(NC}"
-	pip3 install -r requirements.txt
-	@echo "$(GREEN)✓ Dependencies installed$(NC)"
-
-test: ## Run tests
-	@echo "$(YELLOW)Running tests...$(NC)"
-	pytest tests/ -v
-
-lint: ## Run linting
-	@echo "$(YELLOW)Running linters...$(NC)"
-	ruff check app/
-	black --check app/
-
-format: ## Format code
-	@echo "$(YELLOW)Formatting code...$(NC)"
-	black app/
-	ruff check --fix app/
-
-shell: ## Open shell in running container
-	docker-compose exec rag-api /bin/bash
-
-# Docker operations
-docker-build-minikube: ## Build image in Minikube's Docker
-	@echo "$(YELLOW)Building in Minikube Docker...$(NC)"
+.PHONY: build
+build:                            ## Build Docker image inside Minikube
 	eval $$(minikube docker-env) && docker build -t rag-hybrid-search:latest .
-	@echo "$(GREEN)✓ Build complete$(NC)"
 
-# Kubernetes operations
-k8s-apply: ## Apply all Kubernetes manifests
-	kubectl apply -f k8s/all-in-one.yaml
+.PHONY: deploy
+deploy: build                     ## Deploy app + monitoring to Minikube
+	kubectl apply -f k8s/namespace.yaml
+	kubectl apply -f k8s/monitoring/namespace.yaml
+	kubectl apply -f k8s/configmap.yaml
+	kubectl apply -f k8s/pvc.yaml
+	kubectl apply -f k8s/app-deployment.yaml
+	kubectl apply -f k8s/app-service.yaml
+	kubectl apply -f k8s/monitoring/
+	kubectl rollout status deployment/rag-api -n rag-hybrid-search --timeout=120s
 
-k8s-delete: ## Delete all Kubernetes resources
-	kubectl delete -f k8s/all-in-one.yaml
+.PHONY: port-forward
+port-forward:                     ## Forward API + monitoring ports (runs in background)
+	kubectl port-forward -n rag-hybrid-search svc/rag-api-service 8000:8000 &
+	kubectl port-forward -n monitoring svc/prometheus 9090:9090 &
+	kubectl port-forward -n monitoring svc/grafana 3000:3000 &
+	@echo "API      → http://localhost:8000/docs"
+	@echo "Prometheus → http://localhost:9090"
+	@echo "Grafana  → http://localhost:3000"
 
-k8s-restart: ## Restart deployment
-	kubectl rollout restart deployment/rag-api -n rag-hybrid-search
+.PHONY: logs
+logs:                             ## Tail rag-api pod logs
+	kubectl logs -n rag-hybrid-search -l app=rag-api -f --tail=50
 
-k8s-scale: ## Scale deployment (usage: make k8s-scale REPLICAS=3)
-	kubectl scale deployment/rag-api --replicas=$(REPLICAS) -n rag-hybrid-search
+.PHONY: status
+status:                           ## Show pod + service status
+	kubectl get pods,svc -n rag-hybrid-search
+	kubectl get pods,svc -n monitoring
 
-# Monitoring
-watch: ## Watch pod status
-	watch kubectl get pods -n rag-hybrid-search
+# ── Ingestion ──────────────────────────────────────────────────────────────────
 
-events: ## Show recent events
-	kubectl get events -n rag-hybrid-search --sort-by='.lastTimestamp'
+.PHONY: ingest
+ingest:                           ## Ingest Kubernetes docs via live API
+	python scripts/ingest_docs.py \
+		--source $(DOCS_K8S) --name Kubernetes \
+		--api --api-url $(API_URL) \
+		--batch-size $(BATCH_SIZE) --workers $(WORKERS) --concurrent $(CONCURRENT)
 
-describe: ## Describe deployment
-	kubectl describe deployment/rag-api -n rag-hybrid-search
+# ── Tests ──────────────────────────────────────────────────────────────────────
 
-# Documentation download
-download-k8s: ## Download Kubernetes documentation (usage: make download-k8s K8S_VERSION=v1.29)
-	@echo "$(YELLOW)Downloading Kubernetes documentation...$(NC)"
-	bash scripts/download_k8s_docs.sh $(if $(K8S_VERSION),--version $(K8S_VERSION),)
+.PHONY: test
+test:                             ## Run all tests (unit + API via TestClient; skips slow/LLM tests)
+	python -m pytest tests/test_core_modules.py tests/test_api.py -v --tb=short
 
-download-cilium: ## Download Cilium documentation (usage: make download-cilium CILIUM_VERSION=v1.15)
-	@echo "$(YELLOW)Downloading Cilium documentation...$(NC)"
-	bash scripts/download_cilium_docs.sh $(if $(CILIUM_VERSION),--version $(CILIUM_VERSION),)
+.PHONY: test-slow
+test-slow:                        ## Run all tests including slow tests (requires live Ollama)
+	python -m pytest tests/test_core_modules.py tests/test_api.py -v --tb=short --slow
 
-download-all: ## Download both K8s and Cilium docs
-	@echo "$(YELLOW)Downloading all documentation...$(NC)"
-	bash scripts/download_all_docs.sh
+.PHONY: test-unit
+test-unit:                        ## Run unit tests only (no live server needed)
+	python -m pytest tests/test_core_modules.py -v --tb=short
 
-download-and-ingest: ## Download and automatically ingest all docs
-	@echo "$(YELLOW)Downloading and ingesting all documentation...$(NC)"
-	bash scripts/download_all_docs.sh --ingest
+.PHONY: test-api
+test-api:                         ## Run API tests via FastAPI TestClient
+	python -m pytest tests/test_api.py -v --tb=short
 
-# Data ingestion
-ingest-k8s: ## Ingest Kubernetes docs (usage: make ingest-k8s [SOURCE=/path/to/docs])
-	python3 scripts/ingest_k8s_docs.py --source $(or $(SOURCE),data/docs/kubernetes)
+# ── Checks ─────────────────────────────────────────────────────────────────────
 
-ingest-cilium: ## Ingest Cilium docs (usage: make ingest-cilium [SOURCE=/path/to/docs])
-	python3 scripts/ingest_cilium_docs.py --source $(or $(SOURCE),data/docs/cilium)
+.PHONY: lint
+lint:                             ## Run ruff linter (F + E rules)
+	ruff check app/ tests/ --select F,E --ignore E501
+
+.PHONY: health
+health:                           ## Quick health check against running API
+	curl -s $(API_URL)/health | python3 -m json.tool
+
+.PHONY: stats
+stats:                            ## Show current index + cache stats
+	curl -s $(API_URL)/stats | python3 -m json.tool
+
+# ── Cleanup ────────────────────────────────────────────────────────────────────
+
+.PHONY: teardown
+teardown:
+	kubectl delete namespace rag-hybrid-search --ignore-not-found
+	kubectl delete namespace monitoring --ignore-not-found
+
+.PHONY: minikube-stop
+minikube-stop:
+	minikube stop
+
+.PHONY: help
+help:
+	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) \
+		| awk 'BEGIN{FS=":.*##"}{printf "  \033[36m%-20s\033[0m %s\n",$$1,$$2}'
+
+.DEFAULT_GOAL := help

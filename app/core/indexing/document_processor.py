@@ -38,16 +38,27 @@ def process_document(
         # Split document into chunks
         chunks = text_splitter.split_text(content)
 
+        # Contextual prefixing: prepend [title] to each chunk before embedding.
+        # The prefix anchors the embedding to the document topic, improving
+        # retrieval accuracy for chunks with anaphoric references or sparse keywords.
+        # The original (unprefixed) text is stored and displayed; only the
+        # embedding input carries the prefix.
+        from app.config import settings as _settings
+
+        if _settings.USE_CONTEXTUAL_PREFIX:
+            chunks_for_embedding = [f"[{title}] {chunk}" for chunk in chunks]
+        else:
+            chunks_for_embedding = chunks
+
         # Generate embeddings asynchronously
         max_concurrent = doc_data.get("max_concurrent_embeddings", 20)
 
         def run_async_embeddings():
-            """Helper to run async embeddings in a fresh event loop"""
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
                 return loop.run_until_complete(
-                    embed_batch_async(chunks, max_concurrent=max_concurrent)
+                    embed_batch_async(chunks_for_embedding, max_concurrent=max_concurrent)
                 )
             finally:
                 loop.close()
@@ -66,7 +77,7 @@ def process_document(
         valid_chunks = []
         valid_embeddings = []
         for chunk, embedding in zip(chunks, embeddings):
-            if embedding:  # Skip empty embeddings from errors
+            if embedding:
                 valid_chunks.append(chunk)
                 valid_embeddings.append(embedding)
 
@@ -86,13 +97,13 @@ def process_document(
                 }
             )
 
-        if use_faiss:
-            vector_store.add_points(valid_embeddings, payloads)
-        else:
-            vector_store.add_points(valid_embeddings, payloads)
+        vector_store.add_points(valid_embeddings, payloads)
 
-        # Add to BM25 index
-        bm25_index.add_chunks(valid_chunks)
+        # Add to BM25 index — include per-chunk metadata so search results carry it
+        chunk_metadatas = [
+            {**metadata, "title": title, "document_id": doc_id} for _ in valid_chunks
+        ]
+        bm25_index.add_chunks(valid_chunks, metadatas=chunk_metadatas)
 
         return len(valid_chunks), None
 

@@ -9,6 +9,11 @@ description = "RAG system with hybrid search capabilities"
 readme = "README.md"
 requires-python = ">=3.9"
 
+[tool.pytest.ini_options]
+markers = [
+    "slow: requires a live Ollama instance (run with --slow)",
+]
+
 [tool.black]
 line-length = 100
 target-version = ['py39', 'py310', 'py311']

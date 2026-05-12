@@ -35,15 +35,15 @@ def sample_documents():
             "metadata": {"source": "k8s-docs", "category": "basics"},
         },
         {
-            "doc_id": "test_cilium_1",
-            "title": "Cilium Networking",
+            "doc_id": "test_k8s_2",
+            "title": "Kubernetes Networking",
             "content": """
-            Cilium provides eBPF-based networking for Kubernetes.
-            CiliumNetworkPolicy allows L3/L4 and L7 filtering.
-            Hubble provides network observability for Cilium.
-            eBPF enables high-performance packet processing in the kernel.
+            Kubernetes NetworkPolicy controls traffic between pods.
+            Ingress exposes HTTP routes from outside the cluster to services.
+            Services provide stable DNS names and IP addresses for pods.
+            CNI plugins implement the network interface for pods.
             """,
-            "metadata": {"source": "cilium-docs", "category": "networking"},
+            "metadata": {"source": "k8s-docs", "category": "networking"},
         },
     ]
 
@@ -135,9 +135,7 @@ def test_metadata_boosting(rag_pipeline, sample_documents):
         )
 
     # Search with metadata boost
-    boost_config = {
-        "source_quality": {"k8s-docs": 0.3, "cilium-docs": 0.1}  # 30% boost for K8s docs
-    }
+    boost_config = {"source_quality": {"k8s-docs": 0.3}}  # 30% boost for K8s docs
 
     results = rag_pipeline.hybrid_search(
         query="pods containers", boost_config=boost_config, top_k=3
@@ -207,13 +205,13 @@ def test_exact_match_boost(rag_pipeline):
     rag_pipeline.add_document(
         doc_id="exact_test",
         title="Exact Match Test",
-        content="CiliumNetworkPolicy allows fine-grained network access control.",
+        content="HorizontalPodAutoscaler automatically scales workloads based on CPU utilization.",
         metadata={},
     )
 
     # Query with exact phrase
     results_exact = rag_pipeline.hybrid_search(
-        query="CiliumNetworkPolicy", use_heuristics=True, top_k=3
+        query="HorizontalPodAutoscaler", use_heuristics=True, top_k=3
     )
 
     # Query with different terms

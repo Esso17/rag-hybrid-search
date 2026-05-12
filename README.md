@@ -1,353 +1,324 @@
-# Production RAG on Kubernetes: CPU-Only, On-Premise, Zero Cloud Cost
+# RAG Hybrid Search
 
-**A production-ready RAG system that runs on commodity hardware**
+Q&A over K8s docs using hybrid vector + BM25 retrieval, cross-encoder reranking, and a local LLM via Ollama. Runs CPU-only — no GPU, no cloud, no per-query cost.
 
-Built for resource-constrained environments: Minikube (4 CPU, 8GB RAM)
-
----
-
-## 🎯 What Is This?
-
-A complete Retrieval-Augmented Generation (RAG) system optimized for **on-premise, CPU-only deployment** with:
-
-- **Zero cloud costs** - Runs entirely on local infrastructure
-- **No GPU required** - Algorithmic fusion instead of neural rerankers
-- **8GB RAM footprint** - Fits on laptops and edge devices
-- **Production-ready** - Persistence, caching, health checks, monitoring
-- **Validated with benchmarks** - Every optimization claim is reproducible
-
-**Perfect for**:
-- 🏢 On-premise deployments
-- 💻 Local development (Minikube, kind, k3s)
+**Stack:** FastAPI · FAISS HNSW · BM25 · cross-encoder reranking · Ollama · Prometheus
 
 ---
 
-## 🚀 Key Features
+## How it works
 
-### Performance Optimizations (Benchmark Validated)
-
-| Feature | Implementation | Speedup | Benchmark |
-|---------|---------------|---------|-----------|
-| **Vector Search** | FAISS HNSW | 100-1000x | O(log n) vs O(n) |
-| **Keyword Search** | BM25 Inverted Index | 50-500x | O(k) vs O(n×m) |
-| **Score Fusion** | RRF + Heuristics | +11.1% precision | vs weighted average |
-| **Semantic Caching** | Query-Response Cache | 22,820x | 6,846ms → 0.3ms |
-| **Embedding Cache** | LRU + Normalization | 30ms → 0ms | 100% hit on repeats |
-
-### Architecture
-
-- 🔍 **Hybrid Search** - Combines semantic (FAISS) + keyword (BM25) search
-- ⚡ **Algorithmic Fusion** - RRF (Reciprocal Rank Fusion) + quality heuristics
-- 🗄️ **Semantic Caching** - Bypasses entire pipeline for similar queries (0.95+ similarity)
-- 📝 **Code-Aware Chunking** - Preserves YAML/code blocks intact
-- 🎯 **DevOps Optimized** - Technical tokenization for K8s/Cilium documentation
-- 🤖 **Local LLM** - Ollama (phi3.5:3.8b, 3GB)
-
----
-
-## 📊 Production Metrics (Minikube: 4 CPU, 8GB RAM)
+Each query goes through a multi-stage pipeline:
 
 ```
-Performance:
-├─ Query latency (cache miss):  2,050ms  (2s LLM, 50ms search)
-├─ Query latency (cache hit):   <5ms     (400x faster!)
-├─ Average latency:              ~1,400ms (32% cache hit rate)
-├─ Throughput:                   30-40 concurrent users
-└─ Indexing:                     500-1,000 docs/min
-
-Quality (Benchmark Validated):
-├─ Precision@5 (RRF+heuristics): 86.7%   (+11.1% vs weighted average)
-├─ Conceptual queries:           92.0%   (semantic understanding)
-├─ Technical queries:            84.0%   (exact matches)
-└─ Hybrid queries:               86.0%   (balanced)
-
-Resource Usage:
-├─ Memory:  484MB  (FAISS 400MB + BM25 80MB + cache 4MB)
-├─ Disk:    109MB  (persisted, survives pod restarts)
-├─ CPU:     <5% search, ~40% LLM generation
-└─ GPU:     None required
-
-Caching (Benchmark Validated):
-├─ Cache hit rate:      32-40%  (real workloads)
-├─ Speedup:             22,820x (validated, not estimated!)
-├─ Memory overhead:     4MB     (1000 cached entries)
-└─ False positive rate: <0.1%   (0.95 similarity threshold)
+Query
+  │
+  ├─ Semantic cache check  ──hit──▶  Cached answer (< 5 ms)
+  │         │ miss
+  ▼
+  ├─ BM25 search  ┐
+  ├─ Vector search┘ → Score fusion (RRF or weighted) → Reranker (optional)
+  │
+  ▼
+  LLM generation (Ollama)
+  │
+  ▼
+  Answer + sources + metadata
 ```
+
+**Agentic mode** adds an outer loop: query decomposition → iterative retrieval → self-check → gap-filling, up to 3 iterations.
 
 ---
 
-## ⚡ Quick Start (5 Minutes)
+## Requirements
 
-### Prerequisites
+- [Docker](https://docs.docker.com/get-docker/) + Docker Compose
+- [Ollama](https://ollama.ai) installed and running on your host
+- 4 GB RAM minimum (8 GB recommended)
+
+---
+
+## Quick start
 
 ```bash
-# Required
-- Docker Desktop (4 CPU, 8GB RAM)
-- Python 3.11+
-- Git
+# 1. Pull models (one-time, ~3 GB)
+ollama pull phi3.5:3.8b
+ollama pull nomic-embed-text
 
-# Recommended
-- Minikube v1.30+
-- kubectl v1.27+
+# 2. Start the API
+docker compose up -d
+
+# 3. Verify
+curl http://localhost:8000/health
 ```
 
-### 1. Clone and Setup
+API is live at **http://localhost:8000** — interactive docs at **http://localhost:8000/docs**.
+
+---
+
+## Ingesting documents
+
+### Upload a single file
 
 ```bash
-# Clone repository
-git clone https://github.com/yourusername/rag-hybrid-search
-cd rag-hybrid-search
+curl -X POST http://localhost:8000/documents/upload \
+  -F "file=@my-doc.md" \
+  -F "title=My Doc"
+```
 
-# Install dependencies
+### Batch ingest a folder
+
+```bash
+# Via the ingest script (recommended for large folders)
 pip install -r requirements.txt
 
-```
+python scripts/ingest_docs.py --source ./data/docs --name MyDocs
 
-### 2. Start Ollama (Local LLM)
-
-```bash
-# Install Ollama: https://ollama.ai
-
-# Pull models
-ollama pull phi3.5:3.8b          # LLM (3.8GB)
-ollama pull nomic-embed-text     # Embeddings (274MB)
-
-# Start server
-ollama serve
-```
-
-### 3. Run Locally (Without Kubernetes)
-
-```bash
-# Start FastAPI server
-python -m app.main
-
-# API available at http://localhost:8000
-# Docs at http://localhost:8000/docs
-```
-
-### 4. Test It
-
-```bash
-# Health check
-curl http://localhost:8000/health
-
-# Add a document
-curl -X POST http://localhost:8000/add-document \
-  -H "Content-Type: application/json" \
+# Or via the API directly
+curl -X POST http://localhost:8000/documents \
+  -H 'Content-Type: application/json' \
   -d '{
-    "title": "Kubernetes Pods",
-    "content": "A Pod is the smallest deployable unit in Kubernetes...",
-    "metadata": {"source": "kubernetes.io"}
+    "documents": [
+      {"content": "...", "title": "Doc 1", "source": "local"},
+      {"content": "...", "title": "Doc 2", "source": "local"}
+    ]
   }'
+```
 
-# Query
+The ingest script supports `--batch-size`, `--workers`, and `--concurrent` flags to control throughput. Use `--api` flag to send via HTTP instead of the direct pipeline.
+
+---
+
+## Querying
+
+### Standard RAG query
+
+```bash
 curl -X POST http://localhost:8000/query \
-  -H "Content-Type: application/json" \
-  -d '{"query": "What is a Kubernetes pod?"}' | jq
+  -H 'Content-Type: application/json' \
+  -d '{"query": "How does X work?"}' | jq
 ```
 
----
+Response:
 
-## 🐳 Deploy to Kubernetes (Minikube)
+```json
+{
+  "query": "How does X work?",
+  "answer": "...",
+  "sources": [{"title": "...", "content": "...", "score": 0.91}],
+  "generation_time": 1.23,
+  "cache_hit": false,
+  "cache_similarity": null
+}
+```
 
-### 1. Start Minikube
+### Search only (no LLM)
 
 ```bash
-# Start cluster
-minikube start --cpus=4 --memory=8192 --driver=docker
-
-# Verify
-kubectl cluster-info
+curl -X POST http://localhost:8000/search \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "pod scheduling", "top_k": 5}'
 ```
 
-### 2. Build and Deploy
+### Agentic RAG (complex multi-part questions)
+
+Breaks the query into sub-questions, retrieves for each, self-checks the answer, and fills gaps iteratively.
 
 ```bash
-# Build image
-docker build -t rag-hybrid-search:latest .
-
-# Load into Minikube
-minikube image load rag-hybrid-search:latest
-
-# Deploy
-kubectl apply -f k8s/namespace.yaml
-kubectl apply -f k8s/pvc.yaml
-kubectl apply -f k8s/app-deployment.yaml
-kubectl apply -f k8s/service.yaml
-
-# Wait for ready
-kubectl wait --for=condition=ready pod -l app=rag-api \
-  -n rag-hybrid-search --timeout=120s
+curl -X POST http://localhost:8000/query/agentic \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "How do I set up networking and storage for a stateful app?", "max_iterations": 3}'
 ```
 
-### 3. Access the API
+Response includes `sub_questions`, `iterations` (per-iteration log), `final_confidence`, and `final_complete`.
 
-```bash
-# Get service URL
-minikube service rag-api-service -n rag-hybrid-search --url
-# Example: http://127.0.0.1:52000
+### Compare strategies
 
-# Test
-curl http://127.0.0.1:52000/health | jq
-```
-
-### 4. Ingest Documents
-
-```bash
-# Download Kubernetes docs
-git clone --depth 1 https://github.com/kubernetes/website.git ~/k8s-website
-
-# Ingest (direct pipeline - recommended)
-python scripts/ingest_docs.py \
-  --source ~/k8s-website/content/en/docs \
-  --name "Kubernetes"
-
-# Or via API (if server is remote)
-python scripts/ingest_docs.py \
-  --source ~/k8s-website/content/en/docs \
-  --api --api-url http://127.0.0.1:52000
-
-# Check stats
-curl http://127.0.0.1:52000/stats | jq
-```
-
----
-
-## 🔬 Reproduce the Benchmarks
-
-All performance claims are validated with reproducible benchmarks:
-
-### 1. Chunk Size Optimization
-
-```bash
-# Test different chunk sizes and overlaps
-python scripts/benchmark_chunking.py --quick
-
-```
-
-**What you'll learn**: Whether 800 chars is actually optimal for your corpus
-
-### 2. Fusion Strategy A/B Testing
-
-```bash
-# Compare RRF vs Weighted vs Vector-only
-python scripts/benchmark_reranking.py --quick
-
-```
-**Or test via API** (real-time side-by-side):
+A/B test different retrieval approaches on the same query.
 
 ```bash
 curl -X POST http://localhost:8000/query/compare \
-  -H "Content-Type: application/json" \
-  -d '{
-    "query": "How to configure NetworkPolicy?",
-    "strategies": [
-      {"name": "RRF", "fusion_method": "rrf", "use_heuristics": true},
-      {"name": "Weighted", "fusion_method": "weighted"},
-      {"name": "Vector", "use_hybrid": false}
-    ]
-  }' | jq
+  -H 'Content-Type: application/json' \
+  -d '{"query": "What is a DaemonSet?", "strategies": ["hybrid", "vector", "bm25"]}'
 ```
 
-### 3. Caching Performance
+### Evaluate answer quality (LLM-as-judge)
 
 ```bash
-# Validate the 22,820x speedup claim
-python scripts/benchmark_caching.py --quick
-
-```
-### Full Benchmark Suite
-
-```bash
-python scripts/benchmark_all.py --output my_results.json
+curl -X POST http://localhost:8000/evaluate \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "What is a ConfigMap?"}'
 ```
 
-## 🔧 Troubleshooting
+Returns three scores (0–1):
 
-### Ollama Not Found
+| Metric | What it measures |
+|---|---|
+| `faithfulness` | Are claims backed by retrieved context? (hallucination detection) |
+| `answer_relevance` | Does the answer address the question? |
+| `context_relevance` | Are the retrieved chunks useful? |
+| `overall_score` | 0.4×faithfulness + 0.4×answer_relevance + 0.2×context_relevance |
+
+---
+
+## All endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/` | API info + endpoint list |
+| `GET` | `/health` | System health (LLM, vector store) |
+| `GET` | `/stats` | Index size, cache stats, config |
+| `POST` | `/documents` | Batch document ingest |
+| `POST` | `/documents/upload` | Single file upload (multipart) |
+| `POST` | `/search` | Hybrid search — no LLM generation |
+| `POST` | `/query` | Full RAG with semantic caching |
+| `POST` | `/query/compare` | A/B test multiple strategies |
+| `POST` | `/query/agentic` | Iterative agentic RAG |
+| `POST` | `/evaluate` | LLM-as-judge quality metrics |
+| `GET` | `/metrics` | Prometheus metrics |
+
+---
+
+## Configuration
+
+All settings are environment variables. Set them in `docker-compose.yml` or a `.env` file.
+
+### LLM
+
+| Variable | Default | Description |
+|---|---|---|
+| `LLM_MODEL` | `phi3.5:3.8b` | Ollama model for generation |
+| `LLM_BASE_URL` | `http://localhost:11434` | Ollama URL (`host.docker.internal` in Docker) |
+| `LLM_TEMPERATURE` | `0.6` | Generation temperature (0–1) |
+
+### Embeddings
+
+| Variable | Default | Description |
+|---|---|---|
+| `EMBEDDING_MODEL` | `nomic-embed-text` | Ollama embedding model |
+| `EMBEDDING_DIMENSION` | `768` | Vector dimension (must match model) |
+
+### Document processing
+
+| Variable | Default | Description |
+|---|---|---|
+| `CHUNK_SIZE` | `800` | Characters per chunk |
+| `CHUNK_OVERLAP` | `200` | Overlap between chunks |
+| `USE_CODE_AWARE_SPLITTING` | `true` | Preserve YAML/code block boundaries |
+| `USE_CONTEXTUAL_PREFIX` | `true` | Prepend document title to chunks before embedding |
+
+### Search & retrieval
+
+| Variable | Default | Description |
+|---|---|---|
+| `TOP_K_RESULTS` | `7` | Results returned per query |
+| `FUSION_METHOD` | `rrf` | `rrf` (reciprocal rank fusion) or `weighted` |
+| `HYBRID_SEARCH_ALPHA` | `0.6` | Vector weight for weighted fusion (1-α = BM25 weight) |
+| `USE_SEARCH_HEURISTICS` | `true` | Exact-match and overlap score boosts |
+| `USE_FAISS` | `true` | FAISS vector index (disable for in-memory fallback) |
+| `FAISS_USE_HNSW` | `true` | HNSW index (faster) vs flat (exact) |
+| `FAISS_EF_SEARCH` | `50` | HNSW recall/speed trade-off at query time |
+
+### Reranker
+
+| Variable | Default | Description |
+|---|---|---|
+| `USE_RERANKER` | `false` | Cross-encoder reranking (adds ~50 ms, +10–25% precision) |
+
+When enabled, the cross-encoder (`ms-marco-MiniLM-L6-v2`, 22 M params, ~67 MB) rescores candidates after the initial retrieval step. Downloaded automatically on first use.
+
+### Semantic response cache
+
+| Variable | Default | Description |
+|---|---|---|
+| `USE_QUERY_RESPONSE_CACHE` | `true` | Enable semantic caching |
+| `CACHE_SIMILARITY_THRESHOLD` | `0.95` | Min cosine similarity for a cache hit |
+| `CACHE_TTL_SECONDS` | `3600` | Entry expiration (seconds) |
+| `CACHE_MAX_SIZE` | `1000` | Max entries (LRU eviction after limit) |
+
+Cache hits return in < 5 ms instead of ~2000 ms. The cache persists to `data/query_response_cache.json` and is reloaded on restart.
+
+### Prompts
+
+| Variable | Default | Description |
+|---|---|---|
+| `USE_DEVOPS_PROMPTS` | `true` | DevOps/Kubernetes-optimised system prompt |
+
+---
+
+## Changing the LLM model
+
+Any model available in Ollama works:
 
 ```bash
-# Install Ollama
-curl -fsSL https://ollama.com/install.sh | sh
-
-# Or download from: https://ollama.ai
+ollama pull mistral
 ```
 
-### FAISS Not Available
+Then set `LLM_MODEL=mistral` in `docker-compose.yml` and `docker compose up -d`.
+
+---
+
+## Prometheus metrics
+
+Available at `GET /metrics`. Key metrics:
+
+| Metric | Type | Description |
+|---|---|---|
+| `http_requests_total` | Counter | Requests by method, endpoint, status |
+| `http_request_duration_seconds` | Histogram | Latency by endpoint |
+| `cache_hits_total` / `cache_misses_total` | Counter | Cache effectiveness |
+| `search_duration_seconds` | Histogram | Search time by strategy |
+| `generation_duration_seconds` | Histogram | LLM generation time |
+| `documents_ingested_total` | Counter | Documents ingested |
+| `chunks_created_total` | Counter | Chunks created |
+| `agentic_queries_total` | Counter | Agentic queries run |
+| `agentic_iterations` | Histogram | Iterations per agentic query |
+| `evaluation_total` | Counter | Evaluations run |
+| `evaluation_score` | Histogram | Overall evaluation scores |
+
+---
+
+## Development
+
+### Run without Docker
 
 ```bash
-# Install FAISS
-pip install faiss-cpu
+pip install -r requirements.txt
+ollama serve  # in a separate terminal
 
-# Or use in-memory fallback (slower)
-# Edit app/config.py: USE_FAISS = False
+uvicorn app.main:app --reload --port 8000
 ```
 
-### Pod Stuck in Pending (Kubernetes)
+### Makefile targets
 
 ```bash
-# Check PVC bound
-kubectl get pvc -n rag-hybrid-search
-
-# Check resources
-kubectl describe pod -l app=rag-api -n rag-hybrid-search
+make install       # install Python deps
+make models        # pull Ollama models
+make up            # docker compose up -d
+make down          # docker compose down
+make logs-compose  # tail compose logs
+make ingest        # ingest docs via API
+make health        # quick health check
+make stats         # index + cache stats
+make lint          # ruff linter
+make test          # unit + API tests (no live LLM)
+make test-slow     # all tests including live Ollama
+make test-unit     # unit tests only
+make test-api      # API tests via TestClient
 ```
 
-### Out of Memory
+### Tests
 
 ```bash
-# Increase memory limit in k8s/app-deployment.yaml
-resources:
-  limits:
-    memory: "8Gi"  # Increase from 6Gi
+# Fast tests (no Ollama required)
+pytest tests/test_core_modules.py tests/test_api.py -v
+
+# Include slow tests that need a live Ollama instance
+pytest tests/ -v --slow
 ```
 
 ---
 
-## 🤝 Contributing
+## License
 
-Contributions welcome! Areas for improvement:
-- [ ] Distributed deployment guide (StatefulSet)
-- [ ] Prometheus metrics integration
-
-**Before submitting PR**:
-1. Run benchmarks: `python scripts/benchmark_all.py`
-2. Update docs if adding features
-3. Include performance measurements
-
----
-
-## 🙏 Acknowledgments
-
-- **RRF**: Cormack, Clarke & Buettcher (SIGIR 2009) - Reciprocal Rank Fusion
-- **FAISS**: Meta AI Research - Fast approximate nearest neighbors
-- **Ollama**: Local LLM serving made simple
-- **BM25**: Robertson & Zaragoza - Probabilistic relevance framework
-- **Caching**: Mouschoutzi (Towards Data Science) - RAG caching strategies
-
----
-
-## 📝 License
-
-MIT License - See [LICENSE](LICENSE) file
-
----
-
-## 🌟 Star History
-
-If this project helped you, please ⭐ star it on GitHub!
-
----
-
-## 📧 Contact
-
-- Issues: [GitHub Issues](https://github.com/yourusername/rag-hybrid-search/issues)
-- Questions: [Discussions](https://github.com/yourusername/rag-hybrid-search/discussions)
-- Article: [Medium - Production RAG on Kubernetes](link-to-medium)
-
----
-
-**Built with ❤️ for developers who value performance, simplicity, and reproducibility.**
-
-**Made for the real world** - where budgets are limited, infrastructure is constrained, and "good enough" deployed today beats "perfect" never shipped.
+MIT
