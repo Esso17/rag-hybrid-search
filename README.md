@@ -1,32 +1,39 @@
 # RAG Hybrid Search
 
-Q&A over K8s docs using hybrid vector + BM25 retrieval, cross-encoder reranking, and a local LLM via Ollama. Runs CPU-only — no GPU, no cloud, no per-query cost.
+Q&A over K8s docs using two independent retrieval pipelines — hybrid (BM25 + FAISS HNSW) and PageIndex (LLM-guided tree navigation) — with cross-encoder reranking, semantic caching, and a local LLM via Ollama. Runs CPU-only — no GPU, no cloud, no per-query cost.
 
-**Stack:** FastAPI · FAISS HNSW · BM25 · cross-encoder reranking · Ollama · Prometheus
+**Stack:** FastAPI · FAISS HNSW · BM25 · PageIndex · cross-encoder reranking · Ollama · Prometheus
 
 ---
 
 ## How it works
 
-Each query goes through a multi-stage pipeline:
+Two retrieval pipelines are available, selected per-request via `retrieval_method`:
 
 ```
 Query
   │
-  ├─ Semantic cache check  ──hit──▶  Cached answer (< 5 ms)
-  │         │ miss
-  ▼
-  ├─ BM25 search  ┐
-  ├─ Vector search┘ → Score fusion (RRF or weighted) → Reranker (optional)
+  ├─ retrieval_method=hybrid ──────────────────────────────────────────────
+  │    │
+  │    ├─ Semantic cache check  ──hit──▶  Cached answer (< 5 ms)
+  │    │         │ miss
+  │    ├─ BM25 search  ┐
+  │    ├─ Vector search┘ → RRF score fusion → Reranker (optional)
+  │    │
+  │    └─ LLM generation → Answer + sources
   │
-  ▼
-  LLM generation (Ollama)
-  │
-  ▼
-  Answer + sources + metadata
+  └─ retrieval_method=pageindex ───────────────────────────────────────────
+       │  (no cache, no embeddings)
+       ├─ Serialize document section tree → compact TOC text
+       ├─ LLM: "which sections answer this query?" (one call per document)
+       ├─ Slice document lines by returned node IDs
+       │
+       └─ LLM generation → Answer + sources
 ```
 
-**Agentic mode** adds an outer loop: query decomposition → iterative retrieval → self-check → gap-filling, up to 3 iterations.
+**No cache is checked on the PageIndex path.** Each PageIndex query pays the full per-document LLM cost every time. Use `retrieval_method="both"` at index time to load a document into both pipelines and benchmark them head-to-head.
+
+**Agentic mode** (`POST /query/agentic`) adds an outer loop on top of hybrid retrieval: query decomposition → iterative retrieval → self-check → gap-filling, up to 3 iterations.
 
 ---
 
@@ -79,11 +86,13 @@ curl -X POST http://localhost:8000/documents \
   -H 'Content-Type: application/json' \
   -d '{
     "documents": [
-      {"content": "...", "title": "Doc 1", "source": "local"},
-      {"content": "...", "title": "Doc 2", "source": "local"}
-    ]
+      {"content": "...", "title": "Doc 1", "source": "local"}
+    ],
+    "retrieval_method": "hybrid"
   }'
 ```
+
+`retrieval_method` accepts `"hybrid"` (BM25 + FAISS), `"pageindex"` (LLM tree navigation), or `"both"` (indexes into both simultaneously — required before using `/benchmark`).
 
 The ingest script supports `--batch-size`, `--workers`, and `--concurrent` flags to control throughput. Use `--api` flag to send via HTTP instead of the direct pipeline.
 
@@ -91,12 +100,12 @@ The ingest script supports `--batch-size`, `--workers`, and `--concurrent` flags
 
 ## Querying
 
-### Standard RAG query
+### Hybrid query (with semantic cache)
 
 ```bash
 curl -X POST http://localhost:8000/query \
   -H 'Content-Type: application/json' \
-  -d '{"query": "How does X work?"}' | jq
+  -d '{"query": "How does X work?", "retrieval_method": "hybrid"}' | jq
 ```
 
 Response:
@@ -105,12 +114,23 @@ Response:
 {
   "query": "How does X work?",
   "answer": "...",
-  "sources": [{"title": "...", "content": "...", "score": 0.91}],
+  "retrieval_method": "hybrid",
+  "sources": [{"title": "...", "content": "...", "score": 0.91, "source": "hybrid"}],
   "generation_time": 1.23,
   "cache_hit": false,
   "cache_similarity": null
 }
 ```
+
+### PageIndex query (structure-aware, no cache)
+
+```bash
+curl -X POST http://localhost:8000/query \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "How does X work?", "retrieval_method": "pageindex"}' | jq
+```
+
+PageIndex sources carry `section_title` and `node_id` instead of `chunk_index`. `cache_hit` is always `false` — the semantic cache is not used.
 
 ### Search only (no LLM)
 
@@ -168,13 +188,14 @@ Returns three scores (0–1):
 | `GET` | `/` | API info + endpoint list |
 | `GET` | `/health` | System health (LLM, vector store) |
 | `GET` | `/stats` | Index size, cache stats, config |
-| `POST` | `/documents` | Batch document ingest |
+| `POST` | `/documents` | Batch ingest — `retrieval_method`: `hybrid`, `pageindex`, or `both` |
 | `POST` | `/documents/upload` | Single file upload (multipart) |
 | `POST` | `/search` | Hybrid search — no LLM generation |
-| `POST` | `/query` | Full RAG with semantic caching |
+| `POST` | `/query` | Full RAG — `retrieval_method`: `hybrid` (cached) or `pageindex` (uncached) |
 | `POST` | `/query/compare` | A/B test multiple strategies |
-| `POST` | `/query/agentic` | Iterative agentic RAG |
+| `POST` | `/query/agentic` | Iterative agentic RAG (hybrid only) |
 | `POST` | `/evaluate` | LLM-as-judge quality metrics |
+| `POST` | `/benchmark` | Run both pipelines on the same query and compare scores |
 | `GET` | `/metrics` | Prometheus metrics |
 
 ---
@@ -227,7 +248,7 @@ All settings are environment variables. Set them in `docker-compose.yml` or a `.
 
 When enabled, the cross-encoder (`ms-marco-MiniLM-L6-v2`, 22 M params, ~67 MB) rescores candidates after the initial retrieval step. Downloaded automatically on first use.
 
-### Semantic response cache
+### Semantic response cache (hybrid only)
 
 | Variable | Default | Description |
 |---|---|---|
@@ -236,7 +257,7 @@ When enabled, the cross-encoder (`ms-marco-MiniLM-L6-v2`, 22 M params, ~67 MB) r
 | `CACHE_TTL_SECONDS` | `3600` | Entry expiration (seconds) |
 | `CACHE_MAX_SIZE` | `1000` | Max entries (LRU eviction after limit) |
 
-Cache hits return in < 5 ms instead of ~2000 ms. The cache persists to `data/query_response_cache.json` and is reloaded on restart.
+Cache hits return in < 5 ms instead of ~2000 ms. **The semantic cache is only checked on the hybrid path.** PageIndex queries are never served from cache — each one runs a fresh LLM call per document. The cache persists to `data/query_response_cache.json` and is reloaded on restart.
 
 ### Prompts
 
