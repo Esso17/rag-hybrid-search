@@ -323,5 +323,183 @@ class TestRAGPipeline:
         assert hasattr(store, "search")
 
 
+# ── PageIndex Store ────────────────────────────────────────────────────────────
+
+
+class TestPageIndexStore:
+    MARKDOWN_DOC = """# Kubernetes Services
+
+A Service provides stable networking.
+
+## ClusterIP
+
+Default type. Accessible only inside the cluster.
+
+## NodePort
+
+Exposes the Service on each node's IP at a static port.
+
+### When to use NodePort
+
+Use it for development or when you need direct node access.
+
+## LoadBalancer
+
+Provisions an external load balancer from the cloud provider.
+"""
+
+    def _fresh_store(self, tmp_path):
+        from app.core.indexing.pageindex_store import PageIndexStore
+
+        return PageIndexStore(data_dir=str(tmp_path))
+
+    def test_add_document_returns_section_count(self, tmp_path):
+        store = self._fresh_store(tmp_path)
+        result = store.add_document("doc1", "K8s Services", self.MARKDOWN_DOC)
+        assert result["doc_id"] == "doc1"
+        assert result["sections"] >= 4  # root + 3 H2 + 1 H3
+
+    def test_tree_builds_hierarchy(self, tmp_path):
+        store = self._fresh_store(tmp_path)
+        store.add_document("doc1", "K8s Services", self.MARKDOWN_DOC)
+        doc = store.get_document_tree("doc1")
+        tree = doc["tree"]
+        assert len(tree) == 1  # single H1 root
+        root = tree[0]
+        assert root["title"] == "Kubernetes Services"
+        assert root["node_id"] == "1"
+        children = root["children"]
+        assert len(children) == 3  # ClusterIP, NodePort, LoadBalancer
+        assert children[1]["title"] == "NodePort"
+        assert len(children[1]["children"]) == 1  # nested H3
+
+    def test_node_ids_are_hierarchical(self, tmp_path):
+        store = self._fresh_store(tmp_path)
+        store.add_document("doc1", "K8s Services", self.MARKDOWN_DOC)
+        doc = store.get_document_tree("doc1")
+        root = doc["tree"][0]
+        assert root["node_id"] == "1"
+        assert root["children"][0]["node_id"] == "1.1"
+        assert root["children"][1]["node_id"] == "1.2"
+        assert root["children"][1]["children"][0]["node_id"] == "1.2.1"
+
+    def test_get_section_content(self, tmp_path):
+        store = self._fresh_store(tmp_path)
+        store.add_document("doc1", "K8s Services", self.MARKDOWN_DOC)
+        content = store.get_section_content("doc1", "1.2")
+        assert content is not None
+        assert "NodePort" in content
+
+    def test_section_content_none_for_unknown_node(self, tmp_path):
+        store = self._fresh_store(tmp_path)
+        store.add_document("doc1", "K8s Services", self.MARKDOWN_DOC)
+        assert store.get_section_content("doc1", "99.99") is None
+
+    def test_section_content_none_for_unknown_doc(self, tmp_path):
+        store = self._fresh_store(tmp_path)
+        assert store.get_section_content("no_such_doc", "1") is None
+
+    def test_flat_document_gets_fallback_root(self, tmp_path):
+        store = self._fresh_store(tmp_path)
+        store.add_document("doc2", "Plain Doc", "No headers here at all.")
+        doc = store.get_document_tree("doc2")
+        # The store prepends "# Plain Doc" so there is always a root
+        assert len(doc["tree"]) == 1
+        root = doc["tree"][0]
+        assert root["node_id"] == "1"
+
+    def test_save_and_load(self, tmp_path):
+        from app.core.indexing.pageindex_store import PageIndexStore
+
+        store = PageIndexStore(data_dir=str(tmp_path))
+        store.add_document("doc1", "K8s Services", self.MARKDOWN_DOC)
+        assert store.document_count() == 1
+
+        store2 = PageIndexStore(data_dir=str(tmp_path))
+        loaded = store2.load()
+        assert loaded is True
+        assert store2.document_count() == 1
+        assert store2.get_document_tree("doc1") is not None
+
+    def test_load_returns_false_when_no_file(self, tmp_path):
+        from app.core.indexing.pageindex_store import PageIndexStore
+
+        store = PageIndexStore(data_dir=str(tmp_path))
+        assert store.load() is False
+
+    def test_document_count(self, tmp_path):
+        store = self._fresh_store(tmp_path)
+        assert store.document_count() == 0
+        store.add_document("a", "A", "# A\nContent A")
+        store.add_document("b", "B", "# B\nContent B")
+        assert store.document_count() == 2
+
+    def test_get_all_trees(self, tmp_path):
+        store = self._fresh_store(tmp_path)
+        store.add_document("a", "A", "# A\nContent A")
+        store.add_document("b", "B", "# B\nContent B")
+        trees = store.get_all_trees()
+        assert "a" in trees and "b" in trees
+
+
+# ── PageIndex Retriever (parse-only) ──────────────────────────────────────────
+
+
+class TestPageIndexRetrieverParsing:
+    """Tests for the JSON parser — no LLM calls needed."""
+
+    def _make_retriever(self):
+        from unittest.mock import MagicMock
+
+        from app.core.indexing.pageindex_store import PageIndexStore
+        from app.core.retrieval.pageindex_retriever import PageIndexRetriever
+
+        store = MagicMock(spec=PageIndexStore)
+        return PageIndexRetriever(store=store, llm_url="http://localhost:11434", llm_model="test")
+
+    def test_parse_clean_json(self):
+        r = self._make_retriever()
+        ids = r._parse_node_ids('{"relevant_nodes": ["1", "2.1", "3"]}')
+        assert ids == ["1", "2.1", "3"]
+
+    def test_parse_json_with_prose_prefix(self):
+        r = self._make_retriever()
+        ids = r._parse_node_ids('Here are the relevant sections: {"relevant_nodes": ["1.2"]}')
+        assert ids == ["1.2"]
+
+    def test_parse_empty_list(self):
+        r = self._make_retriever()
+        ids = r._parse_node_ids('{"relevant_nodes": []}')
+        assert ids == []
+
+    def test_parse_malformed_returns_empty(self):
+        r = self._make_retriever()
+        ids = r._parse_node_ids("I could not find relevant sections.")
+        assert ids == []
+
+    def test_serialise_tree_indentation(self):
+        r = self._make_retriever()
+        nodes = [
+            {
+                "node_id": "1",
+                "title": "Intro",
+                "line_start": 1,
+                "line_end": 10,
+                "children": [
+                    {
+                        "node_id": "1.1",
+                        "title": "Background",
+                        "line_start": 3,
+                        "line_end": 10,
+                        "children": [],
+                    }
+                ],
+            }
+        ]
+        text = r._serialise_tree(nodes)
+        assert "[1] Intro" in text
+        assert "  [1.1] Background" in text
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -311,6 +311,112 @@ def test_evaluate_hallucination_detection():
     assert r.json()["metrics"]["faithfulness"] <= 0.5
 
 
+# ── PageIndex pipeline ─────────────────────────────────────────────────────────
+
+
+def test_ingest_pageindex_retrieval_method():
+    r = client.post(
+        "/documents",
+        json={
+            "documents": [
+                {
+                    "title": "K8s Services Guide",
+                    "content": (
+                        "# Kubernetes Services\n\n"
+                        "A Service provides stable networking.\n\n"
+                        "## ClusterIP\n\nDefault type, internal only.\n\n"
+                        "## NodePort\n\nExposes on each node's IP.\n"
+                    ),
+                }
+            ],
+            "retrieval_method": "pageindex",
+        },
+    )
+    assert r.status_code == 200
+    data = r.json()
+    # Response schema is always present; disk write may fail outside Docker (/app/data)
+    assert data["total_documents"] == 1
+    assert "successful" in data
+    assert "errors" in data
+
+
+def test_ingest_both_pipelines():
+    r = client.post(
+        "/documents",
+        json={
+            "documents": [
+                {
+                    "title": "Dual-indexed doc",
+                    "content": "# Overview\n\nThis doc is indexed into both pipelines.",
+                }
+            ],
+            "retrieval_method": "both",
+        },
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert data["total_documents"] == 1
+
+
+@pytest.mark.slow
+def test_query_pageindex_response_schema():
+    r = client.post(
+        "/query",
+        json={"query": "What is a Kubernetes Service?", "retrieval_method": "pageindex"},
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert data["retrieval_method"] == "pageindex"
+    assert "answer" in data
+    assert "sources" in data
+    assert "generation_time" in data
+    for src in data["sources"]:
+        assert src["source"] == "pageindex"
+        assert "section_title" in src
+        assert "node_id" in src
+
+
+@pytest.mark.slow
+def test_query_hybrid_response_schema():
+    r = client.post(
+        "/query",
+        json={"query": "What is a ClusterIP service?", "retrieval_method": "hybrid"},
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert data["retrieval_method"] == "hybrid"
+    for src in data["sources"]:
+        assert src["source"] in ("hybrid", "vector", "bm25")
+
+
+def test_query_invalid_retrieval_method():
+    r = client.post(
+        "/query",
+        json={"query": "test", "retrieval_method": "unknown_method"},
+    )
+    assert r.status_code == 422
+
+
+def test_benchmark_endpoint():
+    r = client.post(
+        "/benchmark",
+        json={"queries": ["What is Kubernetes?", "How does NodePort work?"], "top_k": 3},
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert "results" in data
+    assert "summary" in data
+    summary = data["summary"]
+    assert "avg_latency_ms_hybrid" in summary
+    assert "avg_latency_ms_pageindex" in summary
+    assert summary["queries_run"] == 2
+    for entry in data["results"]:
+        assert "query" in entry
+        assert "hybrid" in entry
+        assert "pageindex" in entry
+        assert "faster" in entry
+
+
 # ── Removed endpoints must 404 ─────────────────────────────────────────────────
 
 
@@ -324,6 +430,8 @@ def test_evaluate_hallucination_detection():
         ("POST", "/upload-document"),
         ("POST", "/search/enhanced"),
         ("POST", "/query/enhanced"),
+        ("POST", "/pageindex/documents"),
+        ("POST", "/pageindex/query"),
     ],
 )
 def test_removed_endpoints_return_404(method, path):

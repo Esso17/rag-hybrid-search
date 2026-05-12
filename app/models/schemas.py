@@ -1,6 +1,6 @@
 """Pydantic schemas for API request/response validation"""
 
-from typing import Any, Optional
+from typing import Annotated, Any, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -12,20 +12,40 @@ class DocumentInput(BaseModel):
 
 
 class SearchResult(BaseModel):
-    content: str = Field(..., description="Result content (truncated to 200 chars)")
-    score: float = Field(..., description="Relevance score")
+    """One result from the hybrid pipeline (BM25 + vector + optional reranker)."""
+
+    source: Literal["hybrid", "vector", "bm25"] = Field(
+        default="hybrid",
+        description="Which sub-pipeline produced this result",
+    )
+    content: str = Field(..., description="Chunk text (truncated to 200 chars in responses)")
+    score: float = Field(..., description="Fusion score (RRF or weighted)")
     document_id: str = Field(..., description="Source document ID")
-    chunk_index: int = Field(default=0, description="Chunk index within document")
-    source: str = Field(default="hybrid", description="Search source: hybrid | vector | bm25")
+    chunk_index: int = Field(default=0, description="Position of this chunk within the document")
     title: Optional[str] = Field(default=None, description="Document title")
-    url: Optional[str] = Field(default=None, description="Source documentation URL")
+    url: Optional[str] = Field(default=None, description="Source URL (K8s docs)")
     file_path: Optional[str] = Field(default=None, description="Relative file path")
 
 
-class QueryRequest(BaseModel):
-    query: str = Field(..., description="Search query")
-    top_k: Optional[int] = Field(default=None, description="Number of results to return")
-    use_hybrid: Optional[bool] = Field(default=True, description="Use hybrid search")
+class PageIndexResult(BaseModel):
+    """One result from the PageIndex pipeline (LLM tree navigation, no vectors)."""
+
+    source: Literal["pageindex"] = "pageindex"
+    content: str = Field(..., description="Full text of the retrieved document section")
+    score: float = Field(..., description="Rank-based score: 1.0 for top pick, 0.9 for second…")
+    document_id: str = Field(..., description="Source document ID")
+    title: Optional[str] = Field(default=None, description="Document title")
+    section_title: str = Field(default="", description="Heading text of the retrieved section")
+    node_id: str = Field(
+        default="", description="Hierarchical section ID, e.g. '2.1' = chapter 2, section 1"
+    )
+
+
+# Discriminated union — the `source` field tells parsers which model to use
+RetrievalResult = Annotated[
+    Union[SearchResult, PageIndexResult],
+    Field(discriminator="source"),
+]
 
 
 class QueryResponse(BaseModel):
@@ -37,8 +57,12 @@ class QueryResponse(BaseModel):
 class RAGResponse(BaseModel):
     query: str
     answer: str
-    sources: list[SearchResult]
-    generation_time: float = Field(..., description="Generation time in seconds")
+    retrieval_method: Literal["hybrid", "pageindex"] = Field(
+        default="hybrid",
+        description="Pipeline that produced the sources",
+    )
+    sources: list[RetrievalResult]
+    generation_time: float = Field(..., description="Total wall time in seconds")
     cache_hit: bool = Field(default=False)
     cache_similarity: Optional[float] = Field(default=None)
 
@@ -72,6 +96,14 @@ class BatchDocumentInput(BaseModel):
     documents: list[DocumentInput]
     num_workers: Optional[int] = 4
     max_concurrent_embeddings: Optional[int] = 20
+    retrieval_method: Literal["hybrid", "pageindex", "both"] = Field(
+        default="hybrid",
+        description=(
+            "'hybrid' — BM25 + vector search (default); "
+            "'pageindex' — LLM tree navigation; "
+            "'both' — index into both pipelines simultaneously"
+        ),
+    )
 
 
 class BatchUploadResponse(BaseModel):
@@ -85,6 +117,14 @@ class BatchUploadResponse(BaseModel):
 class EnhancedQueryRequest(BaseModel):
     query: str
     top_k: Optional[int] = None
+    retrieval_method: Literal["hybrid", "pageindex"] = Field(
+        default="hybrid",
+        description=(
+            "'hybrid' — BM25 + vector search with RRF fusion (default); "
+            "'pageindex' — LLM reasons over document section trees"
+        ),
+    )
+    # hybrid-only options (ignored when retrieval_method='pageindex')
     use_hybrid: Optional[bool] = True
     fusion_method: Optional[str] = "rrf"
     use_heuristics: Optional[bool] = True
@@ -152,3 +192,38 @@ class EvaluationResponse(BaseModel):
     )
     rag_time: float = Field(..., description="RAG pipeline time (0 when answer was pre-supplied)")
     eval_time: float = Field(..., description="Evaluation time in seconds")
+
+
+# ── Benchmark schemas ──────────────────────────────────────────────────────────
+
+
+class BenchmarkRequest(BaseModel):
+    queries: list[str] = Field(..., description="Queries to benchmark (min 1)")
+    top_k: Optional[int] = Field(default=5)
+
+
+class PipelineMetrics(BaseModel):
+    latency_ms: float
+    search_time_ms: float
+    num_sources: int
+    answer: str
+
+
+class BenchmarkEntry(BaseModel):
+    query: str
+    hybrid: PipelineMetrics
+    pageindex: PipelineMetrics
+    faster: str = Field(..., description="Which pipeline was faster: 'hybrid' or 'pageindex'")
+
+
+class BenchmarkSummary(BaseModel):
+    avg_latency_ms_hybrid: float
+    avg_latency_ms_pageindex: float
+    avg_sources_hybrid: float
+    avg_sources_pageindex: float
+    queries_run: int
+
+
+class BenchmarkResponse(BaseModel):
+    results: list[BenchmarkEntry]
+    summary: BenchmarkSummary

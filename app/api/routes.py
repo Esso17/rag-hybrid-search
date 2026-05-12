@@ -10,6 +10,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from app.config import settings
 from app.core.agentic_rag import AgenticRAGLoop
 from app.core.evaluation import evaluate as run_evaluation
+from app.core.pageindex_rag import get_pageindex_rag
 from app.core.rag import get_rag_pipeline
 from app.metrics import (
     agentic_iterations_histogram,
@@ -28,6 +29,10 @@ from app.models.schemas import (
     AgenticRAGResponse,
     BatchDocumentInput,
     BatchUploadResponse,
+    BenchmarkEntry,
+    BenchmarkRequest,
+    BenchmarkResponse,
+    BenchmarkSummary,
     CompareRequest,
     CompareResponse,
     ComparisonResult,
@@ -37,6 +42,8 @@ from app.models.schemas import (
     EvaluationResponse,
     HealthResponse,
     IterationLog,
+    PageIndexResult,
+    PipelineMetrics,
     QueryResponse,
     RAGResponse,
     SearchResult,
@@ -51,6 +58,18 @@ def _source_url(source: str, file_path: str) -> Optional[str]:
         return None
     path = PurePosixPath(file_path).with_suffix("")
     return f"{settings.K8S_DOCS_BASE_URL}/{path}/"
+
+
+def _make_pi_result(r: dict, content_limit: int = 500) -> PageIndexResult:
+    """Convert a PageIndex section dict to a PageIndexResult schema object."""
+    return PageIndexResult(
+        content=r["content"][:content_limit],
+        score=r["score"],
+        document_id=r["document_id"],
+        title=r.get("title"),
+        section_title=r.get("section_title", ""),
+        node_id=r.get("node_id", ""),
+    )
 
 
 def _make_result(r: dict, content_limit: int = 200) -> SearchResult:
@@ -70,6 +89,7 @@ def _make_result(r: dict, content_limit: int = 200) -> SearchResult:
 
 
 rag_pipeline = get_rag_pipeline()
+pi_rag = get_pageindex_rag()
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -112,8 +132,11 @@ async def health_check():
 @router.post("/documents", response_model=BatchUploadResponse)
 async def ingest_documents(batch: BatchDocumentInput):
     """
-    Ingest one or more documents (single doc = list of one).
-    Uses parallel workers when multiple documents are provided.
+    Ingest documents into one or both retrieval pipelines.
+
+    - `retrieval_method: "hybrid"` (default) — BM25 + vector index
+    - `retrieval_method: "pageindex"` — hierarchical section tree (no embeddings)
+    - `retrieval_method: "both"` — index into both simultaneously
     """
     try:
         start_time = time.time()
@@ -127,11 +150,24 @@ async def ingest_documents(batch: BatchDocumentInput):
             for idx, doc in enumerate(batch.documents)
         ]
 
-        total_chunks, successful, errors = rag_pipeline.add_documents_parallel(
-            documents=doc_list,
-            num_workers=batch.num_workers,
-            max_concurrent_embeddings=batch.max_concurrent_embeddings,
-        )
+        total_chunks, successful, errors = 0, 0, 0
+        method = batch.retrieval_method
+
+        if method in ("hybrid", "both"):
+            tc, sc, ec = rag_pipeline.add_documents_parallel(
+                documents=doc_list,
+                num_workers=batch.num_workers,
+                max_concurrent_embeddings=batch.max_concurrent_embeddings,
+            )
+            total_chunks += tc
+            successful = max(successful, sc)
+            errors += ec
+
+        if method in ("pageindex", "both"):
+            tc, sc, ec = pi_rag.add_documents_parallel(doc_list)
+            total_chunks += tc
+            successful = max(successful, sc)
+            errors += ec
 
         documents_ingested_total.inc(successful)
         chunks_created_total.inc(total_chunks)
@@ -205,21 +241,32 @@ async def search(request: EnhancedQueryRequest):
 @router.post("/query", response_model=RAGResponse)
 async def query(request: EnhancedQueryRequest):
     """
-    Full RAG: hybrid search + LLM answer with semantic caching.
+    Full RAG: retrieve + LLM answer.
 
-    Cache hits bypass the entire pipeline (<5ms vs ~2s).
-    - `fusion_method`: `"rrf"` (default) or `"weighted"`
-    - `use_heuristics`: overlap/exact-match boosts (default true)
+    - `retrieval_method: "hybrid"` (default) — BM25 + vector search, RRF fusion,
+      semantic cache.  Use `fusion_method`, `use_heuristics`, `boost_config` to tune.
+    - `retrieval_method: "pageindex"` — LLM reasons over the document section tree;
+      no embeddings, no cache.  `fusion_method` / `use_heuristics` are ignored.
     """
     try:
-        search_results, answer, metadata = rag_pipeline.query(
-            query=request.query,
-            use_hybrid=request.use_hybrid,
-            top_k=request.top_k or settings.TOP_K_RESULTS,
-            fusion_method=request.fusion_method,
-            use_heuristics=request.use_heuristics,
-            boost_config=request.boost_config,
-        )
+        top_k = request.top_k or settings.TOP_K_RESULTS
+
+        if request.retrieval_method == "pageindex":
+            search_results, answer, metadata = pi_rag.query(
+                query=request.query,
+                top_k=top_k,
+            )
+            sources = [_make_pi_result(r) for r in search_results]
+        else:
+            search_results, answer, metadata = rag_pipeline.query(
+                query=request.query,
+                use_hybrid=request.use_hybrid,
+                top_k=top_k,
+                fusion_method=request.fusion_method,
+                use_heuristics=request.use_heuristics,
+                boost_config=request.boost_config,
+            )
+            sources = [_make_result(r) for r in search_results]
 
         if metadata.get("cache_hit"):
             cache_hits_total.inc()
@@ -228,14 +275,16 @@ async def query(request: EnhancedQueryRequest):
             generation_duration_seconds.observe(metadata["latency_ms"] / 1000)
 
         logger.info(
-            f"Query: cache_hit={metadata.get('cache_hit', False)} "
-            f"latency={metadata['latency_ms']:.1f}ms fusion={request.fusion_method}"
+            f"Query: method={request.retrieval_method} "
+            f"cache_hit={metadata.get('cache_hit', False)} "
+            f"latency={metadata['latency_ms']:.1f}ms"
         )
 
         return RAGResponse(
             query=request.query,
             answer=answer,
-            sources=[_make_result(r) for r in search_results],
+            retrieval_method=request.retrieval_method,
+            sources=sources,
             generation_time=metadata["latency_ms"] / 1000,
             cache_hit=metadata.get("cache_hit", False),
             cache_similarity=metadata.get("cache_similarity"),
@@ -448,12 +497,72 @@ async def root():
         "endpoints": {
             "health": "GET  /health",
             "stats": "GET  /stats",
-            "ingest": "POST /documents",
+            "ingest": "POST /documents          (retrieval_method: hybrid|pageindex|both)",
             "upload": "POST /documents/upload",
             "search": "POST /search",
-            "query": "POST /query",
+            "query": "POST /query              (retrieval_method: hybrid|pageindex)",
             "compare": "POST /query/compare",
             "agentic": "POST /query/agentic",
             "evaluate": "POST /evaluate",
+            "benchmark": "POST /benchmark",
         },
     }
+
+
+@router.post("/benchmark", response_model=BenchmarkResponse)
+async def benchmark(request: BenchmarkRequest):
+    """
+    Run the same queries through both pipelines and compare side-by-side.
+
+    Returns per-query latency and source counts for hybrid search and
+    PageIndex, plus aggregate summary statistics.
+    Add /evaluate calls after the benchmark if you want quality metrics too.
+    """
+    try:
+        top_k = request.top_k or settings.TOP_K_RESULTS
+        entries: list[BenchmarkEntry] = []
+
+        for query in request.queries:
+            # Hybrid
+            t0 = time.time()
+            h_results, h_answer, h_meta = rag_pipeline.query(
+                query=query, use_hybrid=True, top_k=top_k
+            )
+            h_latency = (time.time() - t0) * 1000
+
+            # PageIndex
+            t1 = time.time()
+            pi_results, pi_answer, pi_meta = pi_rag.query(query=query, top_k=top_k)
+            pi_latency = (time.time() - t1) * 1000
+
+            entries.append(
+                BenchmarkEntry(
+                    query=query,
+                    hybrid=PipelineMetrics(
+                        latency_ms=h_latency,
+                        search_time_ms=h_meta.get("search_time_ms", 0),
+                        num_sources=len(h_results),
+                        answer=h_answer[:300],
+                    ),
+                    pageindex=PipelineMetrics(
+                        latency_ms=pi_latency,
+                        search_time_ms=pi_meta.get("search_time_ms", 0),
+                        num_sources=len(pi_results),
+                        answer=pi_answer[:300],
+                    ),
+                    faster="hybrid" if h_latency < pi_latency else "pageindex",
+                )
+            )
+
+        n = len(entries)
+        summary = BenchmarkSummary(
+            avg_latency_ms_hybrid=sum(e.hybrid.latency_ms for e in entries) / n,
+            avg_latency_ms_pageindex=sum(e.pageindex.latency_ms for e in entries) / n,
+            avg_sources_hybrid=sum(e.hybrid.num_sources for e in entries) / n,
+            avg_sources_pageindex=sum(e.pageindex.num_sources for e in entries) / n,
+            queries_run=n,
+        )
+        return BenchmarkResponse(results=entries, summary=summary)
+    except Exception as e:
+        logger.error(f"Benchmark error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
